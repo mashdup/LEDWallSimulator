@@ -1,0 +1,18 @@
+# Node
+node_modules/
+npm-debug.log*
+.npm/
+
+# Local scratch: capture dumps, calibration exports, ad-hoc probes
+*.log
+*.tmp
+tmp/
+scratch/
+probe-*.html
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

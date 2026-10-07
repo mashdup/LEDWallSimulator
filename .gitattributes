@@ -1,0 +1,16 @@
+# Normalise everything to LF in the repo. The toolchain is Node (core/, web/,
+# tools/, test/) plus one Arduino sketch; mixed endings in a JS repo show up as
+# phantom diffs on every Windows checkout.
+* text=auto eol=lf
+
+# Binary: never diff, never convert.
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.zip binary
+
+# Keep vendored/generated artifacts out of language detection.
+*.ino text eol=lf
+*.txt text eol=lf

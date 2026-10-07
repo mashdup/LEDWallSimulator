@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LED Curtain Wall — Sim</title>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<header>
+  <h1>LED Curtain Wall</h1>
+  <p class="sub">20×20 · 400 WS2812B · browser is the brain, the wall is a dumb pixel sink</p>
+</header>
+
+<main>
+  <section class="stage">
+    <canvas id="sim" width="800" height="800" aria-label="20 by 20 LED panel simulation"></canvas>
+    <div class="stage-bar">
+      <label class="toggle">
+        <input type="checkbox" id="wallView">
+        <span>What the wall actually sees</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="overlay">
+        <span>Index overlay</span>
+      </label>
+      <span id="viewNote" class="note"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <fieldset>
+      <legend>Source</legend>
+      <label>Feed
+        <select id="sourceMode">
+          <option value="text">Banner text — scrolled sideways</option>
+          <option value="page">Live web page — panned through</option>
+        </select>
+      </label>
+    </fieldset>
+
+    <fieldset id="bannerControls">
+      <legend>Banner</legend>
+      <label>Source URL <input id="bannerUrl" type="text" value="./banner.txt" spellcheck="false"></label>
+      <label>Poll <input id="pollMs" type="number" min="100" max="5000" step="50" value="300"> ms</label>
+      <label>Cap height <input id="capRows" type="number" min="4" max="20" step="1" value="14"> rows</label>
+      <label>Speed <input id="speed" type="range" min="0" max="2" step="0.05" value="0.25"> cells/frame</label>
+      <label>Direction
+        <select id="direction">
+          <option value="-1">Left (text flows right→left)</option>
+          <option value="1">Right</option>
+        </select>
+      </label>
+      <output id="bannerText" class="mono"></output>
+    </fieldset>
+
+    <fieldset id="pageControls" hidden>
+      <legend>Live page</legend>
+      <label>Page URL <input id="pageUrl" type="text" value="https://example.com/" spellcheck="false"></label>
+      <label>Capture <input id="pageW" type="number" min="64" max="3840" step="1" value="1280"> × <input id="pageH" type="number" min="64" max="4096" step="1" value="800"> css px</label>
+      <label>Refresh <input id="pagePoll" type="number" min="100" max="60000" step="100" value="500"> ms</label>
+      <label>Settle <input id="pageWait" type="number" min="0" max="10000" step="50" value="400"> ms</label>
+      <label class="toggle"><input type="checkbox" id="pageAutoZoom"><span>Auto zoom (fit the grid)</span></label>
+      <label>Zoom <input id="pageZoom" type="range" min="8" max="128" step="1" value="20"> source px / cell</label>
+      <label>Pan
+        <select id="pageAxis">
+          <option value="y">Down the page</option>
+          <option value="x">Across the page</option>
+        </select>
+      </label>
+      <label>Speed <input id="pageSpeed" type="range" min="0" max="1" step="0.01" value="0.12"> cells/frame</label>
+      <label>Direction
+        <select id="pageDirection">
+          <option value="1">Down</option>
+          <option value="-1">Up</option>
+        </select>
+      </label>
+      <div class="row">
+        <button id="pageRestart" type="button">Restart at top</button>
+        <button id="pageEnd" type="button">Jump to bottom</button>
+      </div>
+      <output id="pageOut" class="mono"></output>
+    </fieldset>
+
+    <fieldset>
+      <legend>Power</legend>
+      <label>Limit <input id="limitMa" type="number" min="500" max="24000" step="100" value="8000"> mA</label>
+      <label>Requested brightness <input id="brightness" type="range" min="0" max="1" step="0.01" value="1"></label>
+      <label>Headroom <input id="headroom" type="range" min="0" max="0.5" step="0.05" value="0.1"></label>
+      <div class="readout mono" id="powerOut"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Layout — edit this once when the wiring is real</legend>
+      <label class="toggle"><input type="checkbox" id="snake"><span>Snake (alternate strips reversed)</span></label>
+      <label class="toggle"><input type="checkbox" id="flipX"><span>flipX</span></label>
+      <label class="toggle"><input type="checkbox" id="flipY"><span>flipY</span></label>
+      <label class="toggle"><input type="checkbox" id="transpose"><span>Transpose</span></label>
+      <label>Strip length <input id="stripLength" type="number" min="1" max="400" step="1" value="20"></label>
+      <label>Strip axis
+        <select id="stripAxis">
+          <option value="x">x — a strip is a row</option>
+          <option value="y">y — a strip is a column</option>
+        </select>
+      </label>
+      <label>Wall wiring (measured)
+        <select id="wallLayout"></select>
+      </label>
+      <div class="row">
+        <button id="cycleVariant" type="button">Try next mounting</button>
+        <button id="indexPattern" type="button">Number every LED</button>
+      </div>
+      <output id="layoutOut" class="mono"></output>
+    </fieldset>
+
+    <fieldset>
+      <legend>Transport</legend>
+      <label>Sink
+        <select id="sink">
+          <option value="sim">Sim only (no wire)</option>
+          <option value="broadcast">Broadcast to another tab</option>
+          <option value="serial">Web Serial → ESP32</option>
+        </select>
+      </label>
+      <label>Baud <input id="baud" type="number" step="100" value="921600"></label>
+      <div class="row">
+        <button id="connect" type="button">Connect</button>
+        <button id="disconnect" type="button" disabled>Disconnect</button>
+      </div>
+      <output id="sinkOut" class="mono"></output>
+    </fieldset>
+
+    <fieldset>
+      <legend>Frames</legend>
+      <div class="readout mono" id="frameOut"></div>
+      <div class="readout mono" id="rxOut"></div>
+    </fieldset>
+  </section>
+</main>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

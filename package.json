@@ -1,0 +1,11 @@
+{
+  "name": "led-wall",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "1m^2 WS2812B curtain wall: browser is the brain, ESP32 is a dumb pixel sink.",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "serve": "node tools/serve.js"
+  }
+}
