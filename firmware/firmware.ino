@@ -72,6 +72,20 @@
 #include <string.h>
 #include "driver/rmt_tx.h"
 
+/* Reset diagnostics. A board that reboots mid-stream blanks the wall, and from
+ * the host's side that is indistinguishable from a stream fault — which makes
+ * every downstream counter look clean while the panel still blinks. `rst` is
+ * esp_reset_reason() and `boots` counts resets without a power cycle. */
+#include "esp_system.h"
+#include "esp_attr.h"
+
+/* Boot bookkeeping. RTC memory survives a software, watchdog or brownout reset
+ * but not a power cycle, and it holds garbage after a cold start — hence the
+ * magic word, which is what tells "first ever boot" from "booted again". */
+RTC_NOINIT_ATTR static uint32_t bootMagic;
+RTC_NOINIT_ATTR static uint32_t bootCount;
+static const uint32_t BOOT_MAGIC = 0x4c454431u;  // 'LED1'
+
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
@@ -704,7 +718,11 @@ static void serviceStatus(void) {
   Serial.print(F(" rmt="));
   Serial.print(rmtChannel == nullptr ? 0 : 1);
   Serial.print(F(" stale="));
-  Serial.println(stats.stale);
+  Serial.print(stats.stale);
+  Serial.print(F(" rst="));
+  Serial.print((int)esp_reset_reason());
+  Serial.print(F(" boots="));
+  Serial.println(bootCount);
 }
 #endif
 
@@ -855,6 +873,13 @@ void setup(void) {
   Serial.begin(BAUD);
   delay(50);
   Serial.println(F("init: serial up"));
+
+  /* Counted before anything else can reset us, so the banner carries it. */
+  if (bootMagic != BOOT_MAGIC) {
+    bootMagic = BOOT_MAGIC;
+    bootCount = 0;
+  }
+  bootCount++;
   ledInit();
   applyBrightnessGuard();
 
@@ -881,7 +906,11 @@ void setup(void) {
   Serial.print(F("B limit="));
   Serial.print(limitMa);
   Serial.print(F("mA br="));
-  Serial.println(activeBrightness);
+  Serial.print(activeBrightness);
+  Serial.print(F(" rst="));
+  Serial.print((int)esp_reset_reason());
+  Serial.print(F(" boots="));
+  Serial.println(bootCount);
 }
 
 void loop(void) {
