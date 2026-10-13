@@ -214,6 +214,19 @@ Why 1500 ms: the browser is the brain, so a stalled tab, a dropped WebSocket or
 a paused dev server all look identical from the wall. A frozen frame is worse
 than dark, because it looks like the wall is working.
 
+**`STALE_MS=0` disables the fade**, and the wall then holds its last frame
+indefinitely. That is what the panel runs in normal use, and the reason is the
+paragraph above read backwards: from the wall's side, a host that merely stalled
+is indistinguishable from one that died. Chrome throttles timers in a background
+tab to ~1 Hz, and to once a minute after five minutes hidden, so a tab that is
+not in front spends longer than `STALE_MS` between frames and the wall blinks
+black every time. Measured here: an 18 s stream that stalled once reported
+`stale=1`; the same stream with `STALE_MS=0` followed by six seconds of total
+silence left `state=live` and `stale=0`, holding the last frame.
+
+Keep the fade for the calibration pass, where a silent stream *should* be
+obvious, and for anything driving the wall from a machine that might die.
+
 ---
 
 ## Power guard
@@ -410,10 +423,11 @@ and each produces a wall that does nothing while every command reports success:
 
 ```sh
 PIN=21                     # 48 for bring-up on the onboard LED, 21 for the panel
+STALE=0                    # 0 = hold the last frame (a display); 1500 = fade
 FQBN="esp32:esp32:esp32s3:FlashSize=8M,PSRAM=disabled,CDCOnBoot=cdc,UploadMode=default"
 arduino-cli compile --fqbn "$FQBN" --build-path build \
-  --build-property "compiler.cpp.extra_flags=-DPIN_DATA=$PIN -DSELFTEST=1" \
-  --build-property "compiler.c.extra_flags=-DPIN_DATA=$PIN -DSELFTEST=1" \
+  --build-property "compiler.cpp.extra_flags=-DPIN_DATA=$PIN -DSTALE_MS=$STALE" \
+  --build-property "compiler.c.extra_flags=-DPIN_DATA=$PIN -DSTALE_MS=$STALE" \
   firmware
 
 # esptool is not on PATH; the core ships it under the Arduino15 tools dir

@@ -60,7 +60,7 @@
  *    -D NUM_LED=400            LED count (frozen at 400 by the protocol)
  *    -D BAUD=921600            serial baud
  *    -D SELFTEST=1             enable the wiring self-test patterns
- *    -D STALE_MS=1500          watchdog: fade to black after this long
+ *    -D STALE_MS=1500          watchdog fade; 0 disables it (hold last frame)
  *    -D MAX_REWINDS=8          rescans allowed per serial drain (== core's budget)
  *    -D DEFAULT_LIMIT_MA=8000  power limit before the host sends a meta frame
  *    -D STATUS=0               silence the periodic status line
@@ -135,7 +135,14 @@
 #define SELFTEST 0
 #endif
 
-/* No complete frame for this long => fade to black, do not freeze. */
+/* No complete frame for this long => fade to black, do not freeze.
+ *
+ * 0 disables the watchdog and the wall holds its last frame indefinitely. That
+ * is what a display wants: at this layer a host that merely stalled — a
+ * throttled browser tab, a long GC pause, a screenshot being taken — is
+ * indistinguishable from one that died, and fading for it turns every hitch in
+ * the stream into a visible blink. The fade is still the right default for the
+ * calibration pass, where a silent stream SHOULD be obvious. */
 #ifndef STALE_MS
 #define STALE_MS 1500
 #endif
@@ -634,7 +641,7 @@ static void serviceWall(void) {
   const uint32_t now = tNow;
 
   if (wall == WALL_LIVE) {
-    if (now - lastCompleteMs >= (uint32_t)STALE_MS) {
+    if (STALE_MS != 0 && now - lastCompleteMs >= (uint32_t)STALE_MS) {
       wall = WALL_FADING;
       fadeStartMs = now;
       fadeStep = 0;
