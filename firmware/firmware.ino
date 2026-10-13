@@ -86,6 +86,15 @@ RTC_NOINIT_ATTR static uint32_t bootMagic;
 RTC_NOINIT_ATTR static uint32_t bootCount;
 static const uint32_t BOOT_MAGIC = 0x4c454431u;  // 'LED1'
 
+/* What a stream actually produced, held in RTC memory so it outlives the reset
+ * that ends the session. Without this a browser session leaves nothing to read:
+ * the reset that closes it also zeroes every counter, which is exactly the
+ * evidence needed to tell a clean stream from a broken one. `rtcLive` is
+ * refreshed once a second, and a new boot banks it into `rtcPrev`, so `prev=` in
+ * the status line reports what the previous session had reached. */
+RTC_NOINIT_ATTR static uint32_t rtcLive[5];  // frames, discarded, resyncs, rewinds, gaps
+RTC_NOINIT_ATTR static uint32_t rtcPrev[5];
+
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
@@ -722,7 +731,21 @@ static void serviceStatus(void) {
   Serial.print(F(" rst="));
   Serial.print((int)esp_reset_reason());
   Serial.print(F(" boots="));
-  Serial.println(bootCount);
+  Serial.print(bootCount);
+  rtcLive[0] = stats.frames;
+  rtcLive[1] = stats.discarded;
+  rtcLive[2] = stats.resyncs;
+  rtcLive[3] = stats.rewinds;
+  rtcLive[4] = stats.seqGaps;
+  /* frames/discarded/rewinds/gaps of the session that ended in a reset. */
+  Serial.print(F(" prev="));
+  Serial.print(rtcPrev[0]);
+  Serial.print('/');
+  Serial.print(rtcPrev[1]);
+  Serial.print('/');
+  Serial.print(rtcPrev[3]);
+  Serial.print('/');
+  Serial.println(rtcPrev[4]);
 }
 #endif
 
@@ -878,7 +901,12 @@ void setup(void) {
   if (bootMagic != BOOT_MAGIC) {
     bootMagic = BOOT_MAGIC;
     bootCount = 0;
+    memset(rtcLive, 0, sizeof(rtcLive));
+    memset(rtcPrev, 0, sizeof(rtcPrev));
   }
+  /* Bank the previous session's totals before this one overwrites them. */
+  memcpy(rtcPrev, rtcLive, sizeof(rtcPrev));
+  memset(rtcLive, 0, sizeof(rtcLive));
   bootCount++;
   ledInit();
   applyBrightnessGuard();
