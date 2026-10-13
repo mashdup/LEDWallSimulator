@@ -520,6 +520,29 @@ records to the dev server, which forwards them as DDP.
 serial port, so a stream can reach the beads through WLED's Apa106 method with no
 DDP, no sketch and no level shifter. Three things, all measured on this panel:
 
+**WiFi starves the serial path — disable it.** WLED's own issue tracker
+(wled/WLED#2698) reports Adalight-over-serial glitching *"in random colours"* and
+traces it to *"interference by wifi activity, proportional to traffic to/from
+WLED"*, with **disabling WiFi on the ESP as the workaround**. Reproduced here:
+streaming 400 LEDs at a fixed 16 frames/s, WLED refreshed 12 fps with a quiet
+network and **8 fps** while the HTTP API was polled 20 times a second. The frames
+that lose the race are dropped, and Adalight has no resync, so every pixel after
+a dropped byte is wrong — flicker in random colours, at any frame rate.
+
+So: for a streamed wall, turn WLED's WiFi off (or never join it), and do not touch
+its web UI or API while streaming. That costs the HTTP API — drive it over the
+serial port, which is the point of this route anyway. The default `115200` baud is
+also only good for *"about 50-100 LEDs"* per WLED's serial docs; this panel has
+400, so raise it under Sync settings. Neither is advisory here.
+
+**The header count is `LED_COUNT - 1`.** WLED's parser does `count += next + 1`
+while reading the two count bytes and then consumes exactly `count` pixels, so the
+Adalight header carries one less than the LED count. Send the raw count and WLED
+reads one pixel past the payload, swallowing the next frame's first three header
+bytes; that frame loses sync and is discarded whole. Every byte of a frame that
+does sync is then perfectly correct — which is why a strip readback says the
+stream is clean while the wall flickers.
+
 The page can do this itself: pick **Sink → `Web Serial → WLED (Adalight)`** in
 the UI and connect. `AdalightSink` wraps each frame record's 1200-byte payload in
 WLED's header — `'A' 'd' 'a'`, the LED count high/low, and `hi ^ lo ^ 0x55` — for
