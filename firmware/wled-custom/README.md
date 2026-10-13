@@ -107,6 +107,33 @@ wall frames=412 meta=3 disc=0 resync=0 rewind=0 gaps=0 br=85/255 lim=8000 state=
 `led_wall_s3_usb` under load; a rarer, self-healing event than Adalight's). On the
 UART build both should sit at 0.
 
+### Measured (led_wall_s3_usb, COM6)
+
+Flashed and confirmed on the real panel: it lights, renders the calibration cycle,
+and holds it steady. Driven with the repo's own host — `node tools/bridge.js
+--port COM6 --cycle --duration 15000` — the sink reported:
+
+```
+bridge: sent 305 frames (0 skipped for backpressure), 366920 bytes, 0 dropped
+wall   frames=337 meta=4 disc=11 resync=11 rewind=11 gaps=21 br=85/255 lim=8000 state=live
+```
+
+305 sent, 295 decoded, 10 lost-byte events, all 10 self-healed by the rewind, **0
+corrupted frames**. That is the USB-CDC transport still losing ~3% — the platform
+bug this build works around — with the framing turning each loss into a skipped
+frame instead of a corrupted run. Adalight would have flickered in random colours
+through the frame after every one of those 10 events.
+
+The meta path clamps as the sketch does: `limitMa=8000` → `br=85/255`,
+`limitMa=24000` → `br=255/255`.
+
+Drop-safety exercised directly (`tmp/verify3.mjs`): a frame one payload byte short,
+immediately followed by a good frame, reported `disc=1 resync=1 rewind=1` and the
+**next** frame still decoded — the rescan found the following magic inside the
+rejected record, which is exactly what `core/frame.js` describes. The residual loss
+is why `led_wall_s3_uart` exists; that env is not yet measured, because it needs the
+cable in the board's UART port.
+
 ## Panel defaults baked in
 
 So a wiped config still lights correctly (values read out of the WLED config that

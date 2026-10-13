@@ -563,6 +563,14 @@ this route becomes viable the moment the transport is a real UART (the board's
 CH9102F port — unverified, and WLED's S3 build may keep `Serial` on USB-CDC
 regardless) rather than USB-CDC.
 
+**The offline serial route is now built — `firmware/wled-custom/`.** WLED keeps its
+Apa106 output and gets the repo's own `0xA5`/`0xA4` framed sink, with the resync
+`core/frame.js` already specified, so a lost byte costs one frame instead of a
+corrupted run. Two builds: `Serial` on the CH9102F UART (recommended — it is the
+transport the byte loss does not affect) or on the S3's own USB-OTG. The USB-OTG
+build is measured on this panel: 305 frames sent, 295 decoded, 10 lost-byte events
+all self-healed, 0 corrupted frames, the wall steady. See that directory's README.
+
 The page can do this itself: **Sink → `Web Serial → WLED (Adalight)`**.
 `AdalightSink` wraps each frame record's 1200-byte payload in WLED's header —
 `'A' 'd' 'a'`, the LED count minus one, and `hi ^ lo ^ 0x55` — for 1206 bytes on
