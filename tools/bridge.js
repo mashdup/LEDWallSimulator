@@ -643,8 +643,14 @@ export function parseStatusLine(line) {
       // `cap=` is full-white current at the applied brightness, not a limit.
       case 'cap': out.fullWhiteMa = Number(value.replace(/mA$/, '')); break;
       case 'limit': out.limitMa = Number(value.replace(/mA$/, '')); break;
+      // The WLED sink spells the declared budget `lim=`; the sketch spells it
+      // `limit=` and appends the unit. Both are the same field.
+      case 'lim': out.limitMa = Number(value.replace(/mA$/, '')); break;
       case 'state': out.state = value; break;
       case 'rx': out.rx = Number(value); break;
+      // Only the WLED sink has a radio to report; the sketch never prints these.
+      case 'wifi': out.wifiMode = Number(value); break;
+      case 'woff': out.wifiOffs = Number(value); break;
       case 'seq': out.seq = Number(value); break;
       case 'frames': out.frames = Number(value); break;
       case 'meta': out.meta = Number(value); break;
