@@ -107,11 +107,26 @@ wall frames=412 meta=3 disc=0 resync=0 rewind=0 gaps=0 br=85/255 lim=8000 state=
 `led_wall_s3_usb` under load; a rarer, self-healing event than Adalight's). On the
 UART build both should sit at 0.
 
-### Measured (led_wall_s3_usb, COM6)
+### Measured on the real panel
 
-Flashed and confirmed on the real panel: it lights, renders the calibration cycle,
-and holds it steady. Driven with the repo's own host — `node tools/bridge.js
---port COM6 --cycle --duration 15000` — the sink reported:
+Both envs flashed and confirmed against the panel. Identical firmware and framing,
+same 400 beads; the only difference is which port `Serial` is on.
+
+**UART0 → CH9102F (`led_wall_s3_uart`, COM8) — lossless.** A moving gradient at
+20 fps for 20 s (`tmp/uart_stream.mjs`):
+
+```
+host sent 400 records
+wall   frames=400 meta=1 disc=0 resync=0 rewind=0 gaps=0 br=255/255 lim=24000 state=live
+```
+
+400 of 400, no discards, no rescans, no gaps. Repeating it with one frame
+deliberately made a payload byte short gave `frames=240 disc=1 resync=1 rewind=1
+gaps=1` across 240 good frames: every real frame still arrived, and the corruption
+was confined to the frame that carried it.
+
+**USB-OTG (`led_wall_s3_usb`, COM6) — ~3% of frames lost, none corrupted.** Driven
+with the repo's own host, `node tools/bridge.js --port COM6 --cycle --duration 15000`:
 
 ```
 bridge: sent 305 frames (0 skipped for backpressure), 366920 bytes, 0 dropped
@@ -119,20 +134,26 @@ wall   frames=337 meta=4 disc=11 resync=11 rewind=11 gaps=21 br=85/255 lim=8000 
 ```
 
 305 sent, 295 decoded, 10 lost-byte events, all 10 self-healed by the rewind, **0
-corrupted frames**. That is the USB-CDC transport still losing ~3% — the platform
-bug this build works around — with the framing turning each loss into a skipped
-frame instead of a corrupted run. Adalight would have flickered in random colours
-through the frame after every one of those 10 events.
+corrupted frames**. That is espressif/arduino-esp32#9378 in the numbers: the
+transport still drops bytes, but the framing turns each loss into a skipped frame
+instead of a corrupted run. Adalight would have flickered in random colours through
+the frame after every one of those 10 events.
 
-The meta path clamps as the sketch does: `limitMa=8000` → `br=85/255`,
+Those two runs are the whole argument for the UART env: same records, same decoder,
+and the loss disappears with the port.
+
+Two things learned on the bench. The CH9102F asserts DTR/RTS on open and this
+board's auto-reset circuit is wired to it, so **opening the port reboots the ESP32** —
+the counters have to be read in the *same* connection that streams, or a close and
+reopen resets them to zero before you can look (`tmp/uart_stream.mjs` does exactly
+that, and is why the first `bridge.js` runs appeared to show `frames=0`). And the
+meta clamp is confirmed on both transports: `limitMa=8000` → `br=85/255`,
 `limitMa=24000` → `br=255/255`.
 
-Drop-safety exercised directly (`tmp/verify3.mjs`): a frame one payload byte short,
-immediately followed by a good frame, reported `disc=1 resync=1 rewind=1` and the
-**next** frame still decoded — the rescan found the following magic inside the
-rejected record, which is exactly what `core/frame.js` describes. The residual loss
-is why `led_wall_s3_uart` exists; that env is not yet measured, because it needs the
-cable in the board's UART port.
+Drop-safety was exercised directly (`tmp/verify3.mjs`): a frame one payload byte
+short, immediately followed by a good frame, reported `disc=1 resync=1 rewind=1` and
+the **next** frame still decoded — the rescan found the following magic inside the
+record it had just rejected, which is exactly what `core/frame.js` describes.
 
 ## Panel defaults baked in
 
