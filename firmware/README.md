@@ -570,6 +570,25 @@ the wire, and drops meta records, which WLED has no field for. The framing is
 correct and tested; on this board the *transport* is what fails, so treat this as
 available but not recommended, and prefer `http` (DDP) above.
 
+**Running this with no network at all — a venue, a party.** The wall needs no
+internet and no router; it needs a link between the laptop and the ESP32, and WLED
+provides one itself. Set **AP Behaviour → Always** (Config → WiFi Setup) so its
+access point comes up regardless of any saved network, then:
+
+1. **join `WLED-AP`** from the laptop — `192.168.4.1` by default, the value in
+   the config's `ap.ip` — and put WLED's output **off** (realtime needs that).
+2. **start the dev server pointed at the AP:**
+   `node tools/serve.js --port 8080 --ddp 192.168.4.1`
+3. **open `http://127.0.0.1:8080/`** and set
+   **Sink → `HTTP → dev server → WLED (DDP)`** → Connect.
+
+Everything the app needs is on loopback — the page, the renderer, the socket — so
+only the DDP datagrams leave the machine, and they only have to reach the ESP32.
+This is the configuration to take to a venue: no cable, no infrastructure, and the
+one path measured clean on this panel (42 frames, 0 dropped, smooth sweep, smooth
+banner). Note it is also unaffected by the WiFi/serial problem above, because it
+*is* the WiFi path rather than a serial one riding alongside it.
+
 - **WLED's own output must be off.** Realtime replaces the strip buffer per
   frame but does not suspend the renderer, so a running effect keeps repainting
   between frames and shows through as colour that tracks your frames. That reads
