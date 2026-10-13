@@ -155,6 +155,45 @@ short, immediately followed by a good frame, reported `disc=1 resync=1 rewind=1`
 the **next** frame still decoded — the rescan found the following magic inside the
 record it had just rejected, which is exactly what `core/frame.js` describes.
 
+## Radio off (`led_wall_s3_uart`)
+
+The UART env turns the ESP32's radio off and keeps it off, so a streamed wall never
+beacons or scans at all (wled/WLED#2698).
+
+**Racing WLED does not work, and is measurably worse than doing nothing.**
+`WiFi.mode(WIFI_OFF)` on its own does not hold: `WLED::handleConnection()` runs every
+loop and re-inits the stack whenever it believes it is disconnected. Instrumented
+with a `woff=` counter, the radio came back every ~9 s and the usermod took it down
+again each time — and because a teardown blocks for far longer than the 8 KB RX ring
+absorbs at 921600, every one of those events cost ~1000 bytes of the stream, seen as
+a `resync` burst:
+
+```
+frames=91  disc=0  resync=0    woff=1
+frames=109 disc=6  resync=1159 woff=2      <- WLED brought it back; the teardown overflowed the ring
+frames=281 disc=12 resync=2027 woff=3
+```
+
+That is worse than leaving WiFi on, which measured lossless on this transport.
+
+**Compiling the manager out is what works.** `handleConnection()` is the only caller
+of `initConnection()`, so `setup.sh` applies a one-line patch to `wled00/wled.cpp`:
+`handleConnection();` guarded by `#ifndef LED_WALL_WIFI_OFF`, against one anchor,
+refusing to patch if that anchor is not found exactly once. With it gone nothing
+re-inits the stack, so the single boot-time teardown holds. The same 20 s at 20 fps:
+
+```
+frames=400 meta=1 disc=0 resync=0 rewind=0 gaps=0 wifi=0 woff=1 state=live
+```
+
+`wifi=0` throughout, `woff=1` (off once at boot, never back), 400 of 400 frames. The
+injected-fault run confirms drop-safety is intact: `disc=1 resync=1 rewind=1` across
+300 good frames.
+
+The cost is the web UI and OTA outright — no AP, no client, no `findWiFi`. The panel
+config is baked in below, so a wall always driven by the wire loses nothing. Use
+`led_wall_s3_usb` when the UI is needed.
+
 ## Panel defaults baked in
 
 So a wiped config still lights correctly (values read out of the WLED config that
@@ -175,9 +214,9 @@ WLED's own brightness so the stream owns the wall.
 
 ## Deliberately not done yet
 
-- **WiFi is left on** (so the UI still works to re-flash/reconfigure). For a
-  streaming venue, turn it off — `-D LED_WALL_WIFI_OFF=1`, or WLED's AP/STA off.
-  WiFi is the #2698 interference source; with it off the serial path is cleanest.
+- **No network surface on the UART env.** The radio is off by design there, so
+  anything that needs it — DDP, the app's `http` sink, OTA, the web UI — needs
+  `led_wall_s3_usb` or a re-flash. That is the trade for a quiet, lossless stream.
 - The usermod is the **v1** API (`wled00/usermod.cpp`) — the least machinery that
   can own `Serial`. If a settings page is ever wanted, move it to a v2 usermod and
   register it in `wled00/usermods_list.cpp`.

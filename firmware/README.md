@@ -570,8 +570,10 @@ lost byte costs one frame instead of a corrupted run. `Serial` can be put on the
 CH9102F UART or on the S3's own USB-OTG; same firmware, same records, and the byte
 loss tracks the port. Measured on this panel: over the UART **400 of 400 frames at
 20 fps, `disc=rewind=gaps=0`**, and over USB-OTG 305 sent / 295 decoded with 10
-lost-byte events, every one self-healed and no frame corrupted. See that
-directory's README.
+lost-byte events, every one self-healed and no frame corrupted. The UART env also
+silences the radio, since that is wled/WLED#2698's interference source — but WLED's
+connection manager brings it back every ~9 s and each teardown costs ~1000 bytes of
+stream, so it is compiled out rather than raced. See that directory's README.
 
 The page can do this itself: **Sink → `Web Serial → WLED (Adalight)`**.
 `AdalightSink` wraps each frame record's 1200-byte payload in WLED's header —

@@ -107,6 +107,28 @@ static uint32_t statGaps      = 0;
 
 #if LED_WALL_WIFI_OFF
 static bool     wifiPulled = false;
+static uint32_t statWifiOff = 0;   // radioOff() calls; >1 means WLED is fighting it
+
+/*
+ * Kill the radio.
+ *
+ * This only holds because setup.sh compiles WLED::handleConnection() out when
+ * LED_WALL_WIFI_OFF is set, and that function is the only caller of
+ * initConnection(). Racing it instead was measured and rejected: left running it
+ * brought the radio back every ~9 s, and because a teardown blocks for far longer
+ * than the 8 KB RX ring absorbs at 921600, each one cost ~1000 bytes of stream
+ * (visible as a resync burst). The state writes below are belt-and-braces for any
+ * path we have not accounted for; userLoop() re-checks each pass.
+ */
+static void radioOff() {
+  statWifiOff++;
+  WiFi.disconnect(true);
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  apActive = false;
+  interfacesInited = false;
+  lastReconnectAttempt = millis();
+}
 #endif
 
 /*
@@ -163,16 +185,6 @@ static void commitFrame() {
     strip.show();
   }
   statFrames++;
-
-#if LED_WALL_WIFI_OFF
-  // First complete frame: the wall is being streamed over a wire, so the radio
-  // is pure interference from here on. See wled/WLED#2698.
-  if (!wifiPulled) {
-    wifiPulled = true;
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-  }
-#endif
 }
 
 static void applyMeta() {
@@ -279,6 +291,20 @@ void userConnected() {
 }
 
 void userLoop() {
+#if LED_WALL_WIFI_OFF
+  /*
+   * Radio off once, at boot, then a cheap check each pass.
+   *
+   * The teardown blocks for a long time, which must NOT happen mid-stream: at
+   * 921600 the 8 KB RX ring is only ~89 ms of slack and the spill shows up as a
+   * burst of resyncs. Hence once, before any frame can arrive. Afterwards the
+   * check is a cached mode field, so it costs nothing; radioOff() runs again only
+   * if something we have not accounted for turned the radio back on.
+   */
+  if (!wifiPulled) { wifiPulled = true; radioOff(); }
+  else if (WiFi.getMode() != WIFI_OFF) radioOff();
+#endif
+
   if (!serialCanRX) return;
 
   // A record that stopped mid-frame is never going to finish.
@@ -308,12 +334,17 @@ void userLoop() {
   const uint32_t now = millis();
   if (serialCanTX && now - lastStatus >= 1000) {
     lastStatus = now;
-    Serial.printf_P(PSTR("wall frames=%lu meta=%lu disc=%lu resync=%lu rewind=%lu gaps=%lu br=%u/%u lim=%u state=%s\n"),
+    Serial.printf_P(PSTR("wall frames=%lu meta=%lu disc=%lu resync=%lu rewind=%lu gaps=%lu br=%u/%u lim=%u wifi=%u woff=%lu state=%s\n"),
                     (unsigned long)statFrames, (unsigned long)statMeta,
                     (unsigned long)statDiscarded, (unsigned long)statResyncs,
                     (unsigned long)statRewinds, (unsigned long)statGaps,
                     (unsigned)activeBrightness, (unsigned)wantBrightness,
-                    (unsigned)limitMa,
+                    (unsigned)limitMa, (unsigned)WiFi.getMode(),
+#if LED_WALL_WIFI_OFF
+                    (unsigned long)statWifiOff,
+#else
+                    0ul,
+#endif
                     realtimeMode ? "live" : "idle");
   }
 #endif
