@@ -543,13 +543,32 @@ bytes; that frame loses sync and is discarded whole. Every byte of a frame that
 does sync is then perfectly correct — which is why a strip readback says the
 stream is clean while the wall flickers.
 
-The page can do this itself: pick **Sink → `Web Serial → WLED (Adalight)`** in
-the UI and connect. `AdalightSink` wraps each frame record's 1200-byte payload in
-WLED's header — `'A' 'd' 'a'`, the LED count high/low, and `hi ^ lo ^ 0x55` — for
-1206 bytes on the wire, and drops meta records, which WLED has no field for. This
-is the route to prefer when the wall is driven from the browser over USB: it puts
-WLED's driver under the browser instead of this sketch's, and nothing here has to
-be flashed to use it.
+**Do not run this route over the S3's USB-CDC port.** Measured here: solid green
+at 15 fps for 40 s, a quiet network, nothing else attached and WLED's own output
+off — it still glitched. That matches espressif/arduino-esp32#9378, *"[HWCDC]
+Missing data via USB Serial on C3/C6/S3"*, which reports the S3 losing bytes on
+its native USB serial. WiFi makes it worse (above); association alone is enough.
+
+Adalight has no resync, so a dropped byte corrupts the rest of that frame *and* the
+frame after it. Both USB attempts on this panel — the Node probe and the browser's
+`adalight` sink — glitch for that reason. It is a platform fault, not a framing
+one: the header count and checksum are now verified correct against WLED's parser,
+and every frame that does arrive syncs byte-perfect (which is exactly why the
+strip readback keeps looking clean while the wall flickers).
+
+**Use DDP over the network instead.** It is measured clean on this wall — 42
+frames, 0 dropped, a smooth sweep, and a smooth scrolling banner through the app's
+`http` sink. `AdalightSink` is kept rather than deleted: the framing is right, and
+this route becomes viable the moment the transport is a real UART (the board's
+CH9102F port — unverified, and WLED's S3 build may keep `Serial` on USB-CDC
+regardless) rather than USB-CDC.
+
+The page can do this itself: **Sink → `Web Serial → WLED (Adalight)`**.
+`AdalightSink` wraps each frame record's 1200-byte payload in WLED's header —
+`'A' 'd' 'a'`, the LED count minus one, and `hi ^ lo ^ 0x55` — for 1206 bytes on
+the wire, and drops meta records, which WLED has no field for. The framing is
+correct and tested; on this board the *transport* is what fails, so treat this as
+available but not recommended, and prefer `http` (DDP) above.
 
 - **WLED's own output must be off.** Realtime replaces the strip buffer per
   frame but does not suspend the renderer, so a running effect keeps repainting
