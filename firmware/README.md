@@ -357,11 +357,14 @@ fails the build if you change it, because the frame payload is 1200 bytes.
 
 ### ESP32-S3 boards
 
-Tested on an **ESP32-S3 DevKitC-1 (N8R8**: 8 MB flash, 8 MB PSRAM). Its CH9102F
-UART bridge is `VID_1A86&PID_55D3` and its own USB-OTG is
-`VID_303A&PID_1001`; the cable has been in the **USB-OTG** port, which
-enumerates as COM6 on this machine. Two things differ from the classic ESP32,
-and each produces a wall that does nothing while every command reports success:
+Tested on an **ESP32-S3 DevKitC-1**. `esptool flash-id` reports **16 MB of flash**
+(manufacturer `0x68`, device `0x4018`, quad, 3.3 V); this file said N8R8/8 MB for
+months and that is wrong, which matters the moment anyone flashes a merged image
+built for a different size. Its CH9102F UART bridge is `VID_1A86&PID_55D3` and its
+own USB-OTG is `VID_303A&PID_1001`; the cable has been in the **USB-OTG** port,
+which enumerates as COM6 on this machine. Two things differ from the classic
+ESP32, and each produces a wall that does nothing while every command reports
+success:
 
 1. **GPIO27 is a flash pin on the S3, and the beads are on 21.** GPIO26–32 are
    the SPI flash interface — GPIO27 is `SPIHD` — so the classic ESP32's data pin
@@ -434,6 +437,18 @@ arduino-cli compile --fqbn "$FQBN" --build-path build \
 ESPTOOL="$LOCALAPPDATA/Arduino15/packages/esp32/tools/esptool_py/5.3.1/esptool.exe"
 "$ESPTOOL" --chip esp32s3 --port COM6 --baud 921600 write_flash @build/flash_args
 ```
+
+> **Flashing someone else's merged image (WLED, etc.) is not the same job.**
+> `write_flash 0x0 image.bin` replaces the bootloader and partition table too, so
+> it cannot be undone by re-flashing this sketch's app region alone — and a build
+> for the wrong flash size or PSRAM type boots into
+> `SHA-256 comparison failed: ... Attempting to boot anyway...` followed by a
+> TG0WDT reset loop, which looks like a dead board. `esptool` still reports
+> "Hash of data verified", because it verifies with the same parameters it wrote.
+> Check the part first with `esptool flash-id`, then use the project's own
+> installer (WLED's web installer at install.wled.me works over Web Serial and
+> picks the variant itself). Recovery is always this sketch: flashing
+> `build/flash_args` rewrites all four regions and the board comes straight back.
 
 `CDCOnBoot=default` is the menu key for **Disabled** — the value is the key,
 not the label, so `CDCOnBoot=disabled` is rejected as an invalid option.
