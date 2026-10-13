@@ -69,6 +69,8 @@ export class PowerBudget {
     this.perChannelMa = opts.perChannelMa ?? WS2812_CHANNEL_MA;
     /** Current ceiling, lowered when an observed frame would have exceeded the limit. */
     this.k = this.maxBrightness;
+    /** Worst frame at full brightness over the recent past; see brightnessFor. */
+    this.worstFullMa = 0;
     this.lastMa = 0;
     this.peakMa = 0;
     this.clampedFrames = 0;
@@ -80,16 +82,31 @@ export class PowerBudget {
 
   /**
    * Brightness multiplier to apply to the next frame.
+   *
+   * The ceiling is clamped against the WORST frame of the recent past, not the
+   * frame in hand. Clamping against this frame's own ink makes the wall's
+   * brightness a function of the picture: a scrolling banner draws more ink from
+   * one frame to the next, so k swings several times a second. Every byte and
+   * every counter stays correct while the whole panel visibly flickers, which is
+   * the failure this class exists to prevent.
+   *
    * @param {Panel} panel
    * @param {number} [requested] the renderer's own artistic multiplier
    */
   brightnessFor(panel, requested = 1) {
     const want = Math.max(0, Math.min(this.maxBrightness, requested));
     const atFull = currentAtBrightness(panel, 1, this.perChannelMa);
-    const limit = this.effectiveLimitMa;
 
+    /* Hold the worst frame of the recent past. Monotonic on purpose: any release
+     * fast enough to matter is also fast enough to make k follow the picture
+     * again, and this frame's own ink is in the max below anyway, so the limit
+     * is still never exceeded even once. reset() starts it over on a scene
+     * change, which is the only thing that should ever brighten the wall back. */
+    this.worstFullMa = Math.max(this.worstFullMa, atFull);
+
+    const limit = this.effectiveLimitMa;
     let k = want;
-    if (atFull > limit) k = Math.min(k, limit / atFull);
+    if (this.worstFullMa > limit) k = Math.min(k, limit / this.worstFullMa);
     k = Math.max(this.minBrightness, k);
 
     this.lastMa = atFull * k;
@@ -115,6 +132,9 @@ export class PowerBudget {
   /** Reset the adaptive ceiling (e.g. after a scene change or on a new meta frame). */
   reset(k = this.maxBrightness) {
     this.k = Math.max(this.minBrightness, Math.min(this.maxBrightness, k));
+    /* A scene change starts the peak-hold over: holding a stale peak would leave
+     * the new scene dim for as long as the release takes. */
+    this.worstFullMa = 0;
     this.peakMa = 0;
     this.clampedFrames = 0;
   }

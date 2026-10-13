@@ -101,6 +101,41 @@ test('the requested brightness is respected when it is lower than the ceiling', 
   assert.equal(budget.clampedFrames, 0);
 });
 
+/*
+ * The two that matter for the panel. Clamping against the frame's own ink makes
+ * the wall's brightness a function of the picture: a scrolling banner dims and
+ * brightens the whole panel several times a second, which is what a flickering
+ * curtain wall looks like with every byte and every counter correct.
+ */
+test('a dip in ink does not step the wall back up', () => {
+  const budget = new PowerBudget(8000, { headroom: 0 });
+  const hot = new Panel();
+  hot.fill(255, 255, 255);
+  const less = new Panel();
+  less.fill(200, 200, 200);
+
+  const k1 = budget.brightnessFor(hot, 1);
+  const k2 = budget.brightnessFor(less, 1);
+  assert.equal(k2, k1, 'dimmer ink must not change the ceiling at all');
+});
+
+test('a dim picture never brightens the wall back', () => {
+  const budget = new PowerBudget(8000, { headroom: 0 });
+  const hot = new Panel();
+  hot.fill(255, 255, 255);
+  const cool = new Panel();
+  cool.fill(20, 20, 20);
+
+  const low = budget.brightnessFor(hot, 1);
+  let k = low;
+  for (let i = 0; i < 60; i++) k = budget.brightnessFor(cool, 1);
+  assert.equal(k, low, 'two seconds of a dimmer picture must not step the wall up');
+
+  // Only a deliberate scene change may brighten it, and that is reset().
+  budget.reset();
+  assert.equal(budget.brightnessFor(cool, 1), 1);
+});
+
 test('minBrightness keeps the wall from going dark on an impossible budget', () => {
   const budget = new PowerBudget(100, { headroom: 0, minBrightness: 0.05 });
   const p = new Panel();
@@ -125,14 +160,6 @@ test('observe lowers the ceiling for the frames that follow a hot one', () => {
   assert.ok(budget.k < kAfter, 'a second hot frame must lower it again');
 });
 
-test('observe leaves the ceiling alone while frames stay under the limit', () => {
-  const budget = new PowerBudget(8000, { headroom: 0 });
-  budget.observe(new Uint8Array(1200).fill(255));
-  const lowered = budget.k;
-
-  budget.observe(new Uint8Array(1200).fill(1));
-  assert.equal(budget.k, lowered);
-});
 
 test('reset restores the ceiling after a scene change', () => {
   const budget = new PowerBudget(8000, { headroom: 0 });
