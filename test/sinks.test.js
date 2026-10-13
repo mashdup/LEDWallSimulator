@@ -19,11 +19,13 @@ import {
   FRAME_END,
   RGB_BYTES,
   LED_COUNT,
+  OFFSET_RGB,
 } from '../core/index.js';
 import {
   SimSink,
   BroadcastSink,
   SerialSink,
+  AdalightSink,
   openSink,
   SINK_KINDS,
   DEFAULT_BAUD,
@@ -86,7 +88,7 @@ function fakePort({ hold = false, fail = false, openError = null } = {}) {
 }
 
 /** Install a navigator.serial that hands out `port`, and return the sink. */
-async function connectedSink(port, opts = {}) {
+async function connectedSink(port, opts = {}, kind = 'serial') {
   const previous = globalThis.navigator;
   Object.defineProperty(globalThis, 'navigator', {
     value: { serial: { requestPort: async () => port } },
@@ -94,7 +96,7 @@ async function connectedSink(port, opts = {}) {
     writable: true,
   });
   try {
-    const sink = new SerialSink(opts);
+    const sink = kind === 'adalight' ? new AdalightSink(opts) : new SerialSink(opts);
     await sink.open();
     return sink;
   } finally {
@@ -593,7 +595,7 @@ test('unsubscribe stops delivery', async () => {
 // -------------------------------------------------------------------------
 
 test('openSink builds every documented kind and rejects an unknown one', async () => {
-  assert.deepEqual(SINK_KINDS, ['sim', 'broadcast', 'serial', 'http']);
+  assert.deepEqual(SINK_KINDS, ['sim', 'broadcast', 'serial', 'adalight', 'http']);
 
   const sim = await openSink('sim');
   assert.equal(sim.kind, 'sim');
@@ -606,12 +608,57 @@ test('openSink builds every documented kind and rejects an unknown one', async (
 
   await assert.rejects(
     () => openSink('websocket'),
-    /unknown sink kind "websocket"; expected one of sim, broadcast, serial, http/,
+    /unknown sink kind "websocket"; expected one of sim, broadcast, serial, adalight, http/,
   );
+
 
   sim.close();
   bc.close();
   http.close();
+});
+/**
+ * The Adalight route exists because WLED's Apa106 driver is the one proven
+ * against this panel. Its framing is small enough to get wrong quietly: a wrong
+ * checksum, or a payload starting one byte early, would still light the wall -
+ * badly - which is the class of bug this file exists to prevent.
+ */
+test('the adalight sink frames a record the way WLED expects', async () => {
+  const port = fakePort();
+  const sink = await connectedSink(port, {}, 'adalight');
+  try {
+    const rec = sampleFrame();
+    assert.equal(sink.send(rec), true);
+    await settle();
+
+    const out = port.written[0];
+    assert.equal(out.length, 1206, '6 header bytes + 1200 of pixel data');
+    assert.deepEqual([...out.subarray(0, 3)], [0x41, 0x64, 0x61], "'A' 'd' 'a'");
+    const hi = out[3];
+    const lo = out[4];
+    assert.equal((hi << 8) | lo, LED_COUNT, 'the header carries the LED count');
+    assert.equal(out[5], hi ^ lo ^ 0x55, 'and the checksum WLED verifies');
+    assert.deepEqual(
+      [...out.subarray(6)],
+      [...rec.subarray(OFFSET_RGB, OFFSET_RGB + RGB_BYTES)],
+      'the pixel payload is the frame body, unmoved',
+    );
+  } finally {
+    await sink.close();
+  }
+});
+
+test('the adalight sink accepts a meta record and sends nothing for it', async () => {
+  const port = fakePort();
+  const sink = await connectedSink(port, {}, 'adalight');
+  try {
+    assert.equal(sink.send(meta({ brightness: 128, limitMa: 8000 })), true);
+    await settle();
+    assert.equal(port.written.length, 0, 'WLED has no meta record');
+    assert.equal(sink.stats.sent, 0, 'and it is not counted as a frame');
+    assert.equal(sink.stats.meta, 1);
+  } finally {
+    await sink.close();
+  }
 });
 
 test('the wire rate is derived from the frame size, not hand-typed', () => {

@@ -17,6 +17,7 @@ export {
   FRAME_BYTES,
   META_BYTES,
   MAX_SEQ,
+  OFFSET_RGB,
   frame,
   encodeFrameInto,
   meta,

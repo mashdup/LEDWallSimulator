@@ -20,7 +20,15 @@
  * no timers.
  */
 
-import { FRAME_BYTES, FRAME_MAGIC, META_BYTES, META_MAGIC } from '../core/frame.js';
+import {
+  FRAME_BYTES,
+  FRAME_MAGIC,
+  META_BYTES,
+  META_MAGIC,
+  OFFSET_RGB,
+  RGB_BYTES,
+  LED_COUNT,
+} from '../core/frame.js';
 
 /** Wire rate; must match firmware/firmware.ino's -D BAUD=921600. */
 export const DEFAULT_BAUD = 921600;
@@ -205,19 +213,24 @@ export class BroadcastSink extends FrameSink {
 }
 
 /**
- * SerialSink — Web Serial to the ESP32. One port, one writer, held open for the
- * whole session: the writer serialises `write()` calls, so a frame handed over in
- * one call is one contiguous run of bytes on the wire and two frames can never
- * interleave.
+ * SerialPortSink — the shared half of every Web Serial sink: acquire the port,
+ * hold at most MAX_IN_FLIGHT records on the wire, notice a cable pull.
+ *
+ * Subclasses supply `encode(record)`: the bytes to write for one record, or null
+ * when this transport has nothing to send for it. The returned buffer belongs to
+ * the sink, not the caller — the stream holds it until the UART has drained
+ * (~13 ms), while the renderer reuses its own buffer on the very next tick — so
+ * an encode that would alias its input has to copy. See SerialSink.encode.
  */
-export class SerialSink extends FrameSink {
+class SerialPortSink extends FrameSink {
   /**
+   * @param {string} kind
    * @param {object} [opts]
    * @param {number} [opts.baud]
-   * @param {number} [opts.maxInFlight] frames queued on the wire at once
+   * @param {number} [opts.maxInFlight] records queued on the wire at once
    */
-  constructor({ baud = DEFAULT_BAUD, maxInFlight = MAX_IN_FLIGHT } = {}) {
-    super('serial');
+  constructor(kind, { baud = DEFAULT_BAUD, maxInFlight = MAX_IN_FLIGHT } = {}) {
+    super(kind);
     this.baud = baud;
     this.maxInFlight = maxInFlight;
     this.port = null;
@@ -231,6 +244,17 @@ export class SerialSink extends FrameSink {
 
   get connected() {
     return this.writer !== null;
+  }
+
+  /**
+   * Wire bytes for one record, or null to send nothing for it.
+   * @abstract
+   * @param {Uint8Array} bytes one complete frame or meta record
+   * @param {'frame'|'meta'} kind already classified by send()
+   * @returns {Uint8Array|null}
+   */
+  encode() {
+    throw new Error(`${this.kind} sink does not implement encode()`);
   }
 
   /**
@@ -292,23 +316,25 @@ export class SerialSink extends FrameSink {
     }
     if (this.writer === null) {
       this.stats.dropped++;
-      if (this.lastError === null) this.lastError = 'serial sink is not open';
+      if (this.lastError === null) this.lastError = `${this.kind} sink is not open`;
       return false;
     }
+
+    const chunk = this.encode(bytes, kind);
+    if (chunk === null) {
+      // This transport has nothing to send for this record — WLED has no meta
+      // record at all. Accepted, and deliberately not counted as a frame.
+      this.stats.meta++;
+      return true;
+    }
+
     if (this.inFlight >= this.maxInFlight) {
-      // The wire is still carrying an earlier frame; skip this one rather than
+      // The wire is still carrying earlier records; skip this one rather than
       // grow a queue. See MAX_IN_FLIGHT.
       this.stats.dropped++;
       return false;
     }
 
-    /**
-     * Copy, deliberately: the stream holds this chunk until the UART has drained
-     * it (~13 ms), and the renderer reuses its frame buffer on the next tick.
-     * Handing the writer a caller-owned buffer would let the next frame overwrite
-     * bytes still in transit — the one way this protocol can be corrupted.
-     */
-    const chunk = bytes.slice();
     this.inFlight++;
     this.stats.sent++;
     this.stats.bytes += chunk.length;
@@ -338,7 +364,7 @@ export class SerialSink extends FrameSink {
     this.writer = null;
     if (writer !== null) {
       try {
-        // writer.close() waits for the frames already queued to drain.
+        // writer.close() waits for the records already queued to drain.
         await writer.close();
       } catch {
         // Broken or already-closed stream; port.close() below is what matters.
@@ -353,6 +379,73 @@ export class SerialSink extends FrameSink {
     this.port = null;
     this.lastError = 'The serial device disconnected.';
   };
+}
+
+/**
+ * SerialSink — Web Serial to the ESP32 running firmware/firmware.ino, sending
+ * this repo's own 1203-byte frame records unchanged.
+ */
+export class SerialSink extends SerialPortSink {
+  constructor(opts) {
+    super('serial', opts);
+  }
+
+  /**
+   * Copy, deliberately: the stream holds this chunk until the UART has drained
+   * it (~13 ms), and the renderer reuses its frame buffer on the next tick.
+   * Handing the writer a caller-owned buffer would let the next frame overwrite
+   * bytes still in transit — the one way this protocol can be corrupted.
+   */
+  encode(bytes) {
+    return bytes.slice();
+  }
+}
+
+/** Bytes before the pixel data in an Adalight frame: 'A' 'd' 'a' hi lo checksum. */
+const ADALIGHT_HEADER = 6;
+
+/**
+ * AdalightSink — Web Serial to WLED, framed as WLED's serial realtime input.
+ *
+ *   'A' 'd' 'a'  hi  lo  checksum        checksum = hi ^ lo ^ 0x55
+ *   <1200 bytes of pixel data, in the strip's own wire order>
+ *
+ * 1206 bytes for 400 LEDs. This exists because WLED's Apa106 driver is the one
+ * proven against this panel: our own RMT bit timing has never been validated
+ * against these beads, and the symptom of getting it slightly wrong is beads
+ * misreading bits — a flicker synchronised to frames, with every host-side
+ * counter reporting success.
+ *
+ * Two requirements, both measured on this wall:
+ *   - **WLED's own output must be off.** Realtime replaces its strip buffer per
+ *     frame but does not suspend the renderer, so a running effect repaints
+ *     between frames and shows through as colour tracking your frames.
+ *   - **Baud is advisory.** The ESP32-S3 presents native USB-CDC, so the rate is
+ *     set by USB, not by this number.
+ *
+ * WLED has no meta record: brightness rides in the frame bytes, and WLED's own
+ * `bri` is a separate control. A meta record is accepted and ignored.
+ */
+export class AdalightSink extends SerialPortSink {
+  constructor(opts) {
+    super('adalight', opts);
+  }
+
+  encode(bytes, kind) {
+    if (kind !== 'frame') return null;
+
+    const hi = (LED_COUNT >> 8) & 0xff;
+    const lo = LED_COUNT & 0xff;
+    const out = new Uint8Array(ADALIGHT_HEADER + RGB_BYTES);
+    out[0] = 0x41; // 'A'
+    out[1] = 0x64; // 'd'
+    out[2] = 0x61; // 'a'
+    out[3] = hi;
+    out[4] = lo;
+    out[5] = hi ^ lo ^ 0x55;
+    out.set(bytes.subarray(OFFSET_RGB, OFFSET_RGB + RGB_BYTES), ADALIGHT_HEADER);
+    return out;
+  }
 }
 
 /**
@@ -424,7 +517,7 @@ export class HttpSink extends FrameSink {
 }
 
 /** Every sink kind openSink() understands. */
-export const SINK_KINDS = ['sim', 'broadcast', 'serial', 'http'];
+export const SINK_KINDS = ['sim', 'broadcast', 'serial', 'adalight', 'http'];
 
 /**
  * Build a sink, and for the serial kind connect it.
@@ -445,8 +538,9 @@ export async function openSink(kind, opts = {}) {
       return new BroadcastSink(opts);
     case 'http':
       return new HttpSink(opts);
-    case 'serial': {
-      const sink = new SerialSink(opts);
+    case 'serial':
+    case 'adalight': {
+      const sink = kind === 'serial' ? new SerialSink(opts) : new AdalightSink(opts);
       await sink.open();
       return sink;
     }

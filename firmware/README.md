@@ -511,12 +511,22 @@ entirely:
    process that never terminates — piped into `tail`, that is indistinguishable
    from a hang, because the device prints at 1 Hz and the pipe buffers the rest.
 
-The page's three sinks today are `sim`, `broadcast`, `serial`
-(`SINK_KINDS` in `web/sinks.js`).
+The page's sinks today are `sim`, `broadcast`, `serial`, `adalight` and `http`
+(`SINK_KINDS` in `web/sinks.js`). `serial` speaks this repo's own 1203-byte
+protocol to the sketch; **`adalight` speaks WLED's** (below); `http` hands the
+records to the dev server, which forwards them as DDP.
 
 **Serial straight to WLED (Adalight).** WLED also takes Adalight frames on its
 serial port, so a stream can reach the beads through WLED's Apa106 method with no
 DDP, no sketch and no level shifter. Three things, all measured on this panel:
+
+The page can do this itself: pick **Sink → `Web Serial → WLED (Adalight)`** in
+the UI and connect. `AdalightSink` wraps each frame record's 1200-byte payload in
+WLED's header — `'A' 'd' 'a'`, the LED count high/low, and `hi ^ lo ^ 0x55` — for
+1206 bytes on the wire, and drops meta records, which WLED has no field for. This
+is the route to prefer when the wall is driven from the browser over USB: it puts
+WLED's driver under the browser instead of this sketch's, and nothing here has to
+be flashed to use it.
 
 - **WLED's own output must be off.** Realtime replaces the strip buffer per
   frame but does not suspend the renderer, so a running effect keeps repainting
