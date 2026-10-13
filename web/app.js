@@ -17,6 +17,7 @@ import {
   identity,
   layoutVariants,
   packInto,
+  applyColor,
   Scroller,
   Panner,
   PowerBudget,
@@ -24,10 +25,15 @@ import {
   encodeFrameInto,
   meta,
   nextSeq,
+  sameBytes,
   FrameDecoder,
-  physicalIndexPattern,
+  calibrationPattern,
+  patternPace,
+  CALIBRATION_PATTERNS,
+  INDEX_MAP_LEGEND,
   FRAME_BYTES,
   RGB_BYTES,
+  WALL_TIMING,
 } from '../core/index.js';
 
 import { Sim } from './sim.js';
@@ -74,8 +80,25 @@ let sourceMode = 'text';
 let renderer = null;
 let sink = null;
 let seq = 0;
+/**
+ * The bytes the CURRENT sink was last given, or null for "this sink has had
+ * nothing". Null rather than a zero-filled buffer because a still wall must
+ * still be pushed once when a sink connects: without that, connecting to an
+ * image that is not changing leaves the wall showing whatever it had.
+ */
+let lastSent = null;
+/** When the last frame went out, so the stale watchdog can be fed. */
+let lastSentMs = 0;
 let wallView = false;
-let indexPattern = false;
+/**
+ * Which calibration pattern the sender is driving, or 'off' for the banner.
+ * Same four patterns as the firmware self-test and the Node bridge, paced by
+ * the same CALIBRATION_TIMING, so the sim's view and the wall's view are
+ * directly comparable during the milestone-5 pass.
+ */
+let calibration = 'off';
+let calStep = 0;
+let calNextMs = 0;
 let fps = 0;
 let lastTick = performance.now();
 let sent = 0;
@@ -176,10 +199,11 @@ function pageReadout() {
 /**
  * Captured page -> Panner.
  *
- * The Panner is REBUILT only when the capture's size changes; a live page that
- * keeps its dimensions gets its `source` swapped in place, which preserves
- * `offset` — re-constructing on every 500 ms poll would snap the pan back to the
- * top of the page and the wall would never get past the first screenful.
+ * The Panner is REBUILT only when the capture's size, zoom, or axis changes; a live
+ * page that keeps its dimensions gets its `source` swapped in place, which preserves
+ * `offset` — re-constructing on every poll would snap the pan back to the top of the
+ * page and the wall would never get past the first screenful. tools/bridge.js's
+ * pageSource had exactly that bug and test/bridge.test.js now pins both sides.
  */
 function buildPanner() {
   const source = page.bitmap();
@@ -250,10 +274,16 @@ function tick() {
   const dt = now - lastTick;
   lastTick = now;
   fps = fps * 0.9 + (1000 / Math.max(dt, 1)) * 0.1;
-
-  if (indexPattern) {
-    // Calibration pattern: every LED shows its own physical index as greyscale.
-    physicalIndexPattern(panel, layout);
+  if (calibration !== 'off') {
+    // Same pacing as the firmware's self-test: the step index advances on a
+    // wall clock, not on this loop's frame rate, so a 30 fps tab and a 240 MHz
+    // ESP32 show the same pattern at the same moment.
+    const pace = patternPace(calibration);
+    if (pace.stepMs > 0 && now >= calNextMs) {
+      calNextMs = now + pace.stepMs;
+      calStep++;
+    }
+    calibrationPattern(calibration, panel, layout, calStep);
   } else {
     // A new source lands on a poll timer, not on this loop, so the frame loop
     // picks it up by identity: null renderer, or a source the renderer does not
@@ -270,14 +300,43 @@ function tick() {
     else panel.clear();
   }
 
-  // Power clamp first: the multiplier is decided from the frame we just drew,
-  // so a bright frame is dimmed before it ever reaches the wall.
+  // Colour before the power clamp: the estimator must see the bytes that actually
+  // leave, and the sim draws these same packed bytes, so the preview stays honest.
+  // Saturation pulls each pixel away from its own mean, which is what rescues a
+  // pastel that the diffuser and a bright wall would otherwise wash to white.
+  applyColor(panel.pixels, {
+    saturation: Number($('saturation').value),
+    gamma: Number($('gamma').value),
+  });
+
+  // Power clamp next: the multiplier is decided from the frame we just drew, so a
+  // bright frame is dimmed before it ever reaches the wall.
+
   const k = budget.brightnessFor(panel, Number($('brightness').value));
   packInto(panel, layout, packed);
   if (k < 1) for (let i = 0; i < packed.length; i++) packed[i] = (packed[i] * k) | 0;
 
   const ma = budget.observe(packed);
   peak.push(packed);
+
+  // A frame goes out when the bytes changed, or when the wall's stale-frame
+  // watchdog is due a feed. The device fades to black after WALL_TIMING.staleMs of
+  // silence, so a change-only rule would darken a still wall: a watchdog cannot
+  // tell "nothing changed" from "the host died". A third of the window leaves 3x
+  // margin, and the same rule and number that tools/bridge.js already uses keeps
+  // the two drivers showing a static pattern identically.
+  //
+  // Continuing here also skips the encode and the seq advance, so a still wall
+  // burns no sequence numbers and the decoder reports no phantom gaps.
+  const changed = lastSent === null || !sameBytes(packed, lastSent);
+  if (!changed && now - lastSentMs < WALL_TIMING.staticRefreshMs) {
+    draw();
+    report(k, ma);
+    return;
+  }
+  if (lastSent === null) lastSent = new Uint8Array(RGB_BYTES);
+  lastSent.set(packed);
+  lastSentMs = now;
 
   encodeFrameInto(wire, seq, packed);
   seq = nextSeq(seq);
@@ -354,6 +413,9 @@ async function connect() {
     // Tell the wall our brightness and current limit before the first frame,
     // so it never runs an unbudgeted frame while the host is still measuring.
     sink.send(meta(budget.toMeta()));
+    // A fresh sink has been given nothing, so the next tick must push even if the
+    // image is not changing; otherwise connecting to a still wall shows nothing.
+    lastSent = null;
     setOutput($('sinkOut'), `connected: ${sink.kind}`, 'ok');
     $('connect').disabled = true;
     $('disconnect').disabled = false;
@@ -417,9 +479,19 @@ $('cycleVariant').addEventListener('click', () => {
   applyLayout();
 });
 
-$('indexPattern').addEventListener('click', () => {
-  indexPattern = !indexPattern;
-  $('indexPattern').textContent = indexPattern ? 'Back to banner' : 'Number every LED';
+$('calibration').addEventListener('change', (e) => {
+  calibration = e.target.value;
+  // Restart the step clock with the pattern: a walk that resumes at step 137
+  // would start mid-strip and read as a wiring fault that is not there.
+  calStep = 0;
+  calNextMs = performance.now();
+  setOutput(
+    $('calOut'),
+    calibration === 'off'
+      ? 'banner feed'
+      : `${calibration}: the sim shows what ${layout.describe()} predicts the wall shows.\n` +
+        (calibration === 'index-map' ? `legend — ${INDEX_MAP_LEGEND}` : 'compare against the wall, then pick the matching mounting below.'),
+  );
 });
 
 $('wallView').addEventListener('change', (e) => {

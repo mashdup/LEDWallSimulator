@@ -593,20 +593,25 @@ test('unsubscribe stops delivery', async () => {
 // -------------------------------------------------------------------------
 
 test('openSink builds every documented kind and rejects an unknown one', async () => {
-  assert.deepEqual(SINK_KINDS, ['sim', 'broadcast', 'serial']);
+  assert.deepEqual(SINK_KINDS, ['sim', 'broadcast', 'serial', 'http']);
 
   const sim = await openSink('sim');
   assert.equal(sim.kind, 'sim');
   const bc = await openSink('broadcast', { channel: `led-wall-test-open-${process.pid}` });
   assert.equal(bc.kind, 'broadcast');
 
+  const http = await openSink('http');
+  assert.equal(http.kind, 'http');
+  assert.equal(http.url, '/frame', 'the endpoint tools/serve.js exposes');
+
   await assert.rejects(
     () => openSink('websocket'),
-    /unknown sink kind "websocket"; expected one of sim, broadcast, serial/,
+    /unknown sink kind "websocket"; expected one of sim, broadcast, serial, http/,
   );
 
   sim.close();
   bc.close();
+  http.close();
 });
 
 test('the wire rate is derived from the frame size, not hand-typed', () => {
@@ -619,15 +624,14 @@ test('the wire rate is derived from the frame size, not hand-typed', () => {
 });
 
 // -------------------------------------------------------------------------
-// Cross-language contract with firmware/sketch.ino
+// Cross-language contract with firmware/firmware.ino
 //
-// The sketch cannot be compiled or run from this machine, so the only available
-// ground truth for the C++ side is its declared constants. The wire format is a
-// two-language contract: if either side drifts, the wall shows garbage. This
-// test reads the sketch and pins every number the byte layout depends on.
+// The wire format is a two-language contract: if either side drifts, the wall
+// shows garbage. This reads the sketch and pins every number the byte layout
+// depends on, comparing VALUES only, never formatting.
 // -------------------------------------------------------------------------
 
-const SKETCH = readFileSync(fileURLToPath(new URL('../firmware/sketch.ino', import.meta.url)), 'utf8');
+const SKETCH = readFileSync(fileURLToPath(new URL('../firmware/firmware.ino', import.meta.url)), 'utf8');
 
 /**
  * Read one protocol constant out of the sketch. The sketch declares them two

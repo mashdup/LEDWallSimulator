@@ -29,10 +29,13 @@ import { bitmap } from '../core/scroller.js';
 const DEFAULT_URL = 'https://example.com/';
 const DEFAULT_ENDPOINT = '/capture';
 /**
- * Poll period. Longer than the banner's 300 ms on purpose: each poll is a real
- * browser screenshot (tens of ms of Chromium work), not a static file read.
+ * Poll period. The measured knee of the capture route: 500 ms yields 4.4
+ * captures/s, 150 ms yields 8.3, 100 ms yields 8.6 — throughput saturates around
+ * 8.5 captures/s because shots are serialised on one tab, so below ~150 ms you
+ * buy no extra frames and only add queueing. 150 ms is therefore the default:
+ * roughly double the content refresh rate of 500 ms for the same browser work.
  */
-const DEFAULT_INTERVAL_MS = 500;
+const DEFAULT_INTERVAL_MS = 150;
 /** A page's natural layout width. 1280 is where most sites stop reflowing. */
 const DEFAULT_VIEWPORT_W = 1280;
 const DEFAULT_VIEWPORT_H = 800;
@@ -130,7 +133,7 @@ export class PageSource {
    * @param {object} [opts]
    * @param {string} [opts.url] page to capture
    * @param {string} [opts.endpoint] capture route
-   * @param {number} [opts.intervalMs] poll period; default 500
+   * @param {number} [opts.intervalMs] minimum gap between captures; default 150
    * @param {number} [opts.width] CSS viewport width; default 1280
    * @param {number} [opts.height] CSS viewport height; default 800
    * @param {number} [opts.dsf] device pixels per CSS pixel; default 1

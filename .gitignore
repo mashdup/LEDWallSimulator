@@ -10,6 +10,10 @@ tmp/
 scratch/
 probe-*.html
 
+# Arduino: the --build-path directory the ESP32-S3 flash flow writes
+build/
+.build/
+
 # Editors / OS
 .vscode/
 .idea/

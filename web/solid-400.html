@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solid colour — calibration fixture</title>
+<style>
+  /* A flat field, edge to edge. Used to check for dead pixels, to confirm the
+     channel order renders the colour it is asked for, and to show whether a
+     STILL frame reaches the wall as steady light — the animated pages cannot
+     answer that one, because a moving frame hides a stream that is stuttering. */
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #0000ff; }
+</style>
+</head>
+<body>
+<script>
+  // ?c=rrggbb overrides the default blue, so one fixture covers every solid-colour
+  // check instead of a file per colour.
+  const hex = new URLSearchParams(location.search).get('c');
+  if (hex && /^[0-9a-fA-F]{6}$/.test(hex)) document.body.style.background = '#' + hex;
+</script>
+</body>
+</html>

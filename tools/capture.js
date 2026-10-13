@@ -1,6 +1,6 @@
 // Live webpage capture: raster a real web page to a PNG using a local headless
 // Chromium driven over the Chrome DevTools Protocol, with zero npm dependencies
-// (node:child_process, node:net, node:fs, node:os, node:path, global fetch,
+// (node:child_process, node:fs, node:os, node:path, global fetch,
 // global WebSocket).
 //
 // Why a browser at all: the LED wall shows whatever the browser app is showing,
@@ -12,9 +12,9 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { freePort } from './ports.js';
 
 /** Viewport defaults for a shot that does not ask for anything specific. */
 const DEFAULTS = {
@@ -168,18 +168,6 @@ function pngDims(png) {
     throw new Error('capture: the browser did not return a PNG');
   }
   return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
-}
-
-/** Ask the OS for a port nobody is using, so we never clash with a 9222 debugger. */
-function freePort() {
-  return new Promise((done, fail) => {
-    const probe = createServer();
-    probe.once('error', fail);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => done(port));
-    });
-  });
 }
 
 /**

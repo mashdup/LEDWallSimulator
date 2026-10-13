@@ -3,9 +3,21 @@
  *  LED curtain wall — ESP32 pixel sink
  * ============================================================================
  *
+ *  ============================ READ THIS FIRST ===========================
+ *  The panel is NOT WS2812B. It is APA106/PL9823: 350 ns high + 1350 ns low for
+ *  a 0 and the reverse for a 1, a 1.7 us bit. No off-the-shelf driver here can
+ *  emit that — Adafruit_NeoPixel only offers 1250 ns and 2500 ns, and
+ *  NeoPixelBus, which can, does not run on ESP32 core 3.x — so the timing is
+ *  generated directly from the RMT below. See firmware/README.md, "Panel
+ *  identity", for how that was established.
+ *
+ *  This sketch is the OFFLINE path: browser -> Web Serial -> here -> beads,
+ *  with no network anywhere. WLED over DDP is the network path.
+ *  ========================================================================
+ *
  *  The browser is the brain. It fetches the banner, rasterises it, applies
  *  effects and streams finished frames. This sketch is a dumb sink: it decodes
- *  frames off the serial port and pushes pixels onto 400 WS2812B.
+ *  frames off the serial port and pushes pixels onto 400 APA106/PL9823 beads.
  *
  *  Wire protocol (FROZEN — mirrors core/frame.js byte for byte):
  *
@@ -44,7 +56,7 @@
  *  or render path, no String, no Vector, no new/malloc, nothing per frame.
  *
  *  Build flags (all overridable with -D):
- *    -D PIN_DATA=27            WS2812 data GPIO
+ *    -D PIN_DATA=27            LED data GPIO (21 on ESP32-S3 — the wired pin)
  *    -D NUM_LED=400            LED count (frozen at 400 by the protocol)
  *    -D BAUD=921600            serial baud
  *    -D SELFTEST=1             enable the wiring self-test patterns
@@ -58,13 +70,29 @@
 
 #include <Arduino.h>
 #include <string.h>
-#include <Adafruit_NeoPixel.h>
+#include "driver/rmt_tx.h"
 
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
+// GPIO27 is a free pin on the classic ESP32 and is the sketch's original
+// default. On the ESP32-S3 it is SPIHD — part of the SPI flash interface — so
+// the same default silently drives the flash chip and the wall stays dark
+// while every command exits 0. Default to a pin that is free on the SoC being
+// built. CONFIG_IDF_TARGET_ESP32S3 is defined only for the S3 target —
+// confirmed by compiling a probe sketch for both targets.
+//
+// 21 is measured, not chosen: it is where the beads are wired, read out of the
+// WLED config that drove this panel before this sketch (hw.led.ins[0].pin).
+// 17 is equally free on the S3 and was the original plan, but nothing is wired
+// to it — a pin-17 build is dark while the decoder reports frames climbing,
+// disc=0, rmt=1 and non-zero est, which reads as a driver fault and is not one.
 #ifndef PIN_DATA
-#define PIN_DATA 27
+#  if defined(CONFIG_IDF_TARGET_ESP32S3)
+#    define PIN_DATA 21
+#  else
+#    define PIN_DATA 27
+#  endif
 #endif
 
 #ifndef NUM_LED
@@ -75,11 +103,32 @@
 #define BAUD 921600
 #endif
 
-/* NEO_GRB is what WS2812B wants. The ESP32 backend of Adafruit_NeoPixel is
- * RMT-based; no extra define is needed, the library picks RMT on ESP32. */
-#ifndef PIXEL_TYPE
-#define PIXEL_TYPE (NEO_GRB + NEO_KHZ800)
-#endif
+/* These beads are APA106/PL9823-class, NOT WS2812B. Established on this panel
+ * by sweeping WLED's chipset list: the only type that renders correctly is
+ * "APA106/PL9823 RGB", and WLED drives it with a dedicated RMT method —
+ * NeoEsp32RmtMethod(Apa106) — where WS2812 uses its Ws2812x one. That method
+ * bit-times 350 ns / 1350 ns, a 1.7 us period (~588 kHz), against WS2812B's
+ * 400 / 800 ns at 1.25 us (800 kHz). This part's "1" threshold therefore falls
+ * between the WS2812B driver's 800 ns and the 1350 ns the bead wants, so a
+ * WS2812B-driven signal decodes *partially*: exactly the "it lights but flickers
+ * like static" seen at bring-up, and never reliably. See firmware/README.md,
+ * "Panel identity".
+ *
+ * The panel wants BGR. WLED renders correct colours at Color Order = BGR on
+ * the live panel, which is the trustworthy observation; the GRB this file used
+ * to carry was derived during the floating-ground episode described below, when
+ * noise made a 4-byte stride look plausible, so it came from unreliable data.
+ * The bit timing and the channel order are both properties of this file now,
+ * not of a library. See ledInit() and the OFF_* constants below.
+ *
+ * History, still true: the panel was first driven through a floating ground —
+ * no GND between the ESP32 and the panel's own 5 V supply — which garbled every
+ * dense frame into colour bands, and that noise is what made a 4-byte RGBW
+ * stride look like the answer.
+ *
+ * The order is BGR: WLED drives this panel correctly at Color Order = BGR, and
+ * NeoPixelBus's own ESP32 examples pair this WS2811-family part with its BGR
+ * feature. It lives in one place below, so swapping it is a one-line change. */
 
 /* 1 = compile in the wiring self-test (milestone 5: layout calibration). */
 #ifndef SELFTEST
@@ -178,15 +227,68 @@ static_assert(META_BYTES == 1u + 1u + 2u + 1u, "meta layout mismatch");
 // ---------------------------------------------------------------------------
 // Static storage — no heap anywhere below
 // ---------------------------------------------------------------------------
-static Adafruit_NeoPixel strip(NUM_LED, PIN_DATA, PIXEL_TYPE);
+static uint8_t wireBuf[LED_BYTES];    // what the strip is sent, in wire order
+
+/* Channel order on the wire. The protocol carries R,G,B; these beads want B,G,R. */
+static const uint8_t OFF_R = 2, OFF_G = 1, OFF_B = 0;
+
+/* ---- LED output: the part's own bit timing, straight out of the RMT --------
+ *
+ * 20 MHz resolution makes one tick 50 ns, so both durations are exact integers:
+ * 350 ns = 7 ticks, 1350 ns = 27. That exactness is the point — a rounded
+ * duration is the same class of error as the wrong bit rate.
+ *
+ * rmt_new_tx_channel() rejects the legacy driver's company: mixing driver/rmt.h
+ * with driver/rmt_tx.h aborts with "driver_ng is not allowed to be used with the
+ * legacy driver". This file uses the new API only.
+ */
+static const uint32_t RMT_RESOLUTION_HZ = 20u * 1000u * 1000u;
+static const uint16_t TICKS_T0H = 7;   // 350 ns
+static const uint16_t TICKS_T0L = 27;  // 1350 ns
+static const uint16_t TICKS_T1H = 27;  // 1350 ns
+static const uint16_t TICKS_T1L = 7;   // 350 ns
+
+static rmt_channel_handle_t rmtChannel = nullptr;
+static rmt_encoder_handle_t rmtEncoder = nullptr;
+
+/** Install the RMT channel and its encoder. False leaves the wall dark. */
+static bool ledInit(void) {
+  rmt_tx_channel_config_t ch = {};
+  ch.clk_src = RMT_CLK_SRC_DEFAULT;
+  ch.gpio_num = (gpio_num_t)PIN_DATA;
+  ch.resolution_hz = RMT_RESOLUTION_HZ;
+  ch.mem_block_symbols = 64;
+  /* Must be non-zero: rmt_new_tx_channel() rejects depth 0 with
+   * ESP_ERR_INVALID_ARG, and a zero-initialised struct leaves it at 0. */
+  ch.trans_queue_depth = 4;
+  if (rmt_new_tx_channel(&ch, &rmtChannel) != ESP_OK) return false;
+
+  rmt_bytes_encoder_config_t enc = {};
+  enc.bit0.level0 = 1; enc.bit0.duration0 = TICKS_T0H;
+  enc.bit0.level1 = 0; enc.bit0.duration1 = TICKS_T0L;
+  enc.bit1.level0 = 1; enc.bit1.duration0 = TICKS_T1H;
+  enc.bit1.level1 = 0; enc.bit1.duration1 = TICKS_T1L;
+  enc.flags.msb_first = 1;
+  if (rmt_new_bytes_encoder(&enc, &rmtEncoder) != ESP_OK) return false;
+
+  return rmt_enable(rmtChannel) == ESP_OK;
+}
+
+/* Clock the buffer out and wait for it: 1200 bytes is ~16.3 ms of wire time, so
+ * loop() is blocked for it exactly as it was with a library show(). The UART ring
+ * buffer holds three frames, so the host keeps streaming through it. */
+static void ledShow(void) {
+  if (rmtChannel == nullptr) return;
+  rmt_transmit_config_t tx = {};
+  tx.loop_count = 0;
+  if (rmt_transmit(rmtChannel, rmtEncoder, wireBuf, sizeof(wireBuf), &tx) == ESP_OK) {
+    rmt_tx_wait_all_done(rmtChannel, 200);
+  }
+}
 
 static uint8_t rxBuf[LED_BYTES];      // frame currently being received
 static uint8_t lastFrame[LED_BYTES];  // last COMPLETE frame, wire order (R,G,B)
 
-/* Channel offsets inside the NeoPixel buffer, derived from PIXEL_TYPE once in
- * setup() so the render loop never re-derives them and never calls
- * setPixelColor() 400 times. Bits 5:4 = red offset, 3:2 = green, 1:0 = blue. */
-static uint8_t offR = 0, offG = 0, offB = 0;
 
 /* millis() is read once per loop() iteration, never per byte: a frame is 1203
  * bytes and the decoder must not pay for a clock read on each one. */
@@ -249,9 +351,9 @@ struct Stats {
  *      limit  24000 mA -> B_max 255
  *
  * This is the full-white bound, so it is conservative: a real banner frame has
- * dark cells and draws less. Adafruit_NeoPixel also applies gamma tables when
- * scaling by brightness, which pulls the effective channel value below the
- * linear B/255 estimate — again on the safe side of the limit.
+ * dark cells and draws less. renderWall() applies the scale with the same
+ * integer shift the whole render path uses (see brightnessScale below), so the
+ * estimate and the draw share one arithmetic rather than two.
  */
 static uint8_t maxBrightnessForLimit(uint16_t limit) {
   const uint32_t denom = (uint32_t)NUM_LED * 3u * (uint32_t)CHANNEL_MA;  // 24000
@@ -264,23 +366,39 @@ __attribute__((unused)) static uint32_t fullWhiteMa(uint8_t brightness) {
   return ((uint32_t)NUM_LED * 3u * (uint32_t)CHANNEL_MA * (uint32_t)brightness) / 255u;
 }
 
-/* Estimated current of the frame actually on the wall: sum every channel value
- * and scale by CHANNEL_MA/255. Integer only, no float, no allocation.
- * Reported by the status line; kept available for the power guard. */
-__attribute__((unused)) static uint32_t estimateFrameMa(const uint8_t *rgb) {
+/* Estimated current of what is ACTUALLY on the wall: the frame's channel sum
+ * scaled by CHANNEL_MA/255 and by the brightness actually applied. Integer only,
+ * no float, no allocation. Reported by the status line.
+ *
+ * Worst product: 1200 * 255 * 20 * 255 = 1.56e9, inside uint32. */
+__attribute__((unused)) static uint32_t estimateFrameMa(const uint8_t *rgb, uint8_t brightness) {
   uint32_t sum = 0;
   for (uint16_t i = 0; i < LED_BYTES; i++) sum += rgb[i];
-  return ((uint32_t)CHANNEL_MA * sum) / 255u;
+  const uint32_t b = (brightness >= 255u) ? 255u : (uint32_t)brightness;
+  return ((uint32_t)CHANNEL_MA * sum * b) / (255u * 255u);
 }
 
 static uint8_t  wantBrightness = 255;             // what the host asked for
 static uint16_t limitMa        = DEFAULT_LIMIT_MA;  // declared budget
 static uint8_t  activeBrightness = 0;             // wantBrightness, clamped
 
+/* NOTE: brightness is never handed to the driver, and that is deliberate.
+ *
+ * NeoPixelBus's SetPixelColor() is a plain store — it applies no scaling of its
+ * own — so renderWall() folds the brightness into the value it writes. That
+ * keeps the guard real: activeBrightness is what actually reaches the LEDs, not
+ * a field on a driver object that nothing reads. */
 static void applyBrightnessGuard(void) {
   const uint8_t cap = maxBrightnessForLimit(limitMa);
   activeBrightness = (wantBrightness <= cap) ? wantBrightness : cap;
-  strip.setBrightness(activeBrightness);
+}
+
+/* Brightness as an 8-bit fixed-point scale: a stored brightness b < 255 scales
+ * a channel as (c * b) >> 8, and 255 means "no scaling at all". 256 is the
+ * identity multiplier. This is the sketch's own arithmetic — see the note above
+ * on why the driver is not asked to scale. */
+static uint16_t brightnessScale(void) {
+  return (activeBrightness >= 255u) ? 256u : (uint16_t)activeBrightness;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,31 +426,42 @@ static bool     haveLastSeq    = false;
 static bool selftestActive = true;
 #endif
 
-/* Copy lastFrame into the NeoPixel buffer and clock it out.
- * scale256 == 256 is identity; lower values are the watchdog fade. */
-static void renderWall(uint16_t scale256) {
-  uint8_t *px = strip.getPixels();
-  if (scale256 >= 256u) {
+/* Copy lastFrame onto the strip and clock it out.
+ *
+ * fadeScale == 256 is "no watchdog fade"; lower values are the fade ramp. The
+ * declared brightness is folded in here rather than left to a brightness call,
+ * because this is the only place the pixels actually reach the strip:
+ *
+ *   scale = (fadeScale * brightnessScale) >> 8
+ *
+ * Both factors top out at 256, so the product fits in 16 bits and 256*256>>8
+ * lands back on the identity branch. SetPixelColor() is a plain store in
+ * NeoPixelBus — no gamma table, no brightness call — so this is still one pass
+ * over the frame, and the feature reorders the channels on the way in. */
+static void renderWall(uint16_t fadeScale) {
+  const uint16_t scale = (uint16_t)(((uint32_t)fadeScale * (uint32_t)brightnessScale()) >> 8);
+
+  if (scale >= 256u) {
     for (uint16_t i = 0; i < NUM_LED; i++) {
       const uint16_t w = (uint16_t)(i * 3);
-      px[w + offR] = lastFrame[w + 0];
-      px[w + offG] = lastFrame[w + 1];
-      px[w + offB] = lastFrame[w + 2];
+      wireBuf[w + OFF_R] = lastFrame[w + 0];
+      wireBuf[w + OFF_G] = lastFrame[w + 1];
+      wireBuf[w + OFF_B] = lastFrame[w + 2];
     }
   } else {
     for (uint16_t i = 0; i < NUM_LED; i++) {
       const uint16_t w = (uint16_t)(i * 3);
-      px[w + offR] = (uint8_t)((lastFrame[w + 0] * scale256) >> 8);
-      px[w + offG] = (uint8_t)((lastFrame[w + 1] * scale256) >> 8);
-      px[w + offB] = (uint8_t)((lastFrame[w + 2] * scale256) >> 8);
+      wireBuf[w + OFF_R] = (uint8_t)((lastFrame[w + 0] * scale) >> 8);
+      wireBuf[w + OFF_G] = (uint8_t)((lastFrame[w + 1] * scale) >> 8);
+      wireBuf[w + OFF_B] = (uint8_t)((lastFrame[w + 2] * scale) >> 8);
     }
   }
-  strip.show();
+  ledShow();
 }
 
 static void clearWall(void) {
-  strip.clear();
-  strip.show();
+  memset(wireBuf, 0, sizeof(wireBuf));
+  ledShow();
 }
 
 /* A frame just passed every check. Publish it, then render it. */
@@ -352,9 +481,14 @@ static void commitFrame(void) {
   renderWall(256u);
 
 #if SELFTEST
-  /* A real frame from the browser takes over the wall immediately. */
-  selftestActive = false;
-  Serial.println(F("selftest: stopped by host frame"));
+  /* A real frame from the browser takes over the wall immediately. The
+   * announcement is on the TRANSITION only: commitFrame() runs once per frame,
+   * so printing unconditionally spams ~30 lines/s at 30 fps and buries the
+   * status line that the calibration pass reads. */
+  if (selftestActive) {
+    selftestActive = false;
+    Serial.println(F("selftest: stopped by host frame"));
+  }
 #endif
 }
 
@@ -363,8 +497,9 @@ static void applyMeta(uint8_t brightness, uint16_t limit) {
   wantBrightness = brightness;
   limitMa = limit;
   applyBrightnessGuard();
-  /* setBrightness() only takes effect at show(): repaint the frame we already
-   * have so a meta frame is visible immediately, even between frames. */
+  /* The new clamp has to reach the wall now, not at the next frame: repaint the
+   * frame we already have. renderWall() applies the brightness itself, so this
+   * is a real repaint, not a no-op. */
   if (wall == WALL_LIVE) renderWall(256u);
 }
 
@@ -536,7 +671,7 @@ static void serviceStatus(void) {
   Serial.print(F("/"));
   Serial.print(maxBrightnessForLimit(limitMa));
   Serial.print(F(" est="));
-  Serial.print(estimateFrameMa(lastFrame));
+  Serial.print(estimateFrameMa(lastFrame, activeBrightness));
   Serial.print(F("mA cap="));
   Serial.print(fullWhiteMa(activeBrightness));
   Serial.print(F("mA limit="));
@@ -557,6 +692,10 @@ static void serviceStatus(void) {
   Serial.print(stats.rewinds);
   Serial.print(F(" gaps="));
   Serial.print(stats.seqGaps);
+  /* Visible proof the output stage exists: a null channel means every frame is
+   * rendered and thrown away, which no other counter can show. */
+  Serial.print(F(" rmt="));
+  Serial.print(rmtChannel == nullptr ? 0 : 1);
   Serial.print(F(" stale="));
   Serial.println(stats.stale);
 }
@@ -700,10 +839,6 @@ static void selftestRun(void) {
 // setup / loop
 // ---------------------------------------------------------------------------
 void setup(void) {
-  offR = (uint8_t)((PIXEL_TYPE >> 4) & 3u);
-  offG = (uint8_t)((PIXEL_TYPE >> 2) & 3u);
-  offB = (uint8_t)(PIXEL_TYPE & 3u);
-
   memset(rxBuf, 0, sizeof(rxBuf));
   memset(lastFrame, 0, sizeof(lastFrame));
 
@@ -711,10 +846,10 @@ void setup(void) {
    * clocks out ~12 ms while the host keeps streaming. */
   Serial.setRxBufferSize(SERIAL_RX_BYTES);
   Serial.begin(BAUD);
-  strip.begin();
-  strip.clear();
+  delay(50);
+  Serial.println(F("init: serial up"));
+  ledInit();
   applyBrightnessGuard();
-  strip.show();
 
   wall = WALL_DARK;
   state = RX_IDLE;

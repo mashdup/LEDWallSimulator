@@ -178,8 +178,8 @@ export class Panner {
   /**
    * How the source is drawn right now: {x, y, w, h, scale} in cells.
    *
-   * Cached against the source size and the zoom, so a 500 ms refresh of an
-   * unchanged capture does not redo the maths and a new capture invalidates it.
+   * Cached against the source size and the zoom, so a refresh of an unchanged
+   * capture does not redo the maths and a new capture invalidates it.
    */
   get rect() {
     const key = this.#geometryKey();

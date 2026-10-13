@@ -141,6 +141,22 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 #bannerText { display: block; margin-top: 8px; color: var(--accent); white-space: pre-wrap; }
 
+/* The boot failure banner in index.html: it must read as a blocking problem, not
+   as another note in the sidebar, because the alternative is a black canvas. */
+.notice {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  background: #170f12;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.notice p { margin: 0 0 8px; }
+.notice p:last-child { margin-bottom: 0; }
+.notice code { font-family: var(--mono); color: var(--accent); }
+
 .note { color: var(--dim); font-size: 11.5px; }
 .err { color: var(--bad); }
 .ok { color: var(--good); }

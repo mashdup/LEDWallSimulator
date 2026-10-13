@@ -21,6 +21,7 @@ export {
   encodeFrameInto,
   meta,
   nextSeq,
+  sameBytes,
   FrameDecoder,
 } from './frame.js';
 export {
@@ -34,10 +35,23 @@ export {
 export { downsampleArea, downsampleAreaRGB, blitArea } from './raster.js';
 export { Scroller, bitmap, LEFT, RIGHT } from './scroller.js';
 export { Panner, fitRect, fillRect, DOWN, UP } from './panner.js';
+export { applyBrightness, blend, wipe, gradient } from './effects.js';
 export {
-  applyBrightness,
-  blend,
-  wipe,
-  gradient,
-  physicalIndexPattern,
-} from './effects.js';
+  applyColor,
+  gammaTable,
+  COLOR_DEFAULTS,
+  SATURATION_RANGE,
+  GAMMA_RANGE,
+  TYPICAL_GAMMA,
+} from './color.js';
+export {
+  CALIBRATION_PATTERNS,
+  CALIBRATION_TIMING,
+  WALL_TIMING,
+  INDEX_MAP_LEGEND,
+  INDEX_MAP_GROUP,
+  patternColor,
+  patternPace,
+  calibrationPattern,
+  calibrationPhysicalBytes,
+} from './calibration.js';

@@ -9,8 +9,21 @@
 <body>
 <header>
   <h1>LED Curtain Wall</h1>
-  <p class="sub">20×20 · 400 WS2812B · browser is the brain, the wall is a dumb pixel sink</p>
+  <p class="sub">20×20 · 400 APA106/PL9823 beads · browser is the brain, the wall is a dumb pixel sink</p>
 </header>
+
+<div id="bootError" class="notice" hidden>
+  <p class="err"><strong>This page must be served, not opened from disk.</strong></p>
+  <p>
+    Run <code>npm start</code> and open the loopback URL it prints
+    (<code>http://127.0.0.1:8080/</code>). Opening <code>index.html</code> with
+    <code>file://</code> blocks the ES module import of <code>app.js</code> and
+    <code>../core/*.js</code>, so the sim never starts. Web Serial needs the
+    loopback URL too — <code>file://</code> never exposes
+    <code>navigator.serial</code>.
+  </p>
+  <p class="readout mono" id="bootErrorDetail"></p>
+</div>
 
 <main>
   <section class="stage">
@@ -58,7 +71,7 @@
       <legend>Live page</legend>
       <label>Page URL <input id="pageUrl" type="text" value="https://example.com/" spellcheck="false"></label>
       <label>Capture <input id="pageW" type="number" min="64" max="3840" step="1" value="1280"> × <input id="pageH" type="number" min="64" max="4096" step="1" value="800"> css px</label>
-      <label>Refresh <input id="pagePoll" type="number" min="100" max="60000" step="100" value="500"> ms</label>
+      <label>Refresh <input id="pagePoll" type="number" min="100" max="60000" step="50" value="150"> ms</label>
       <label>Settle <input id="pageWait" type="number" min="0" max="10000" step="50" value="400"> ms</label>
       <label class="toggle"><input type="checkbox" id="pageAutoZoom"><span>Auto zoom (fit the grid)</span></label>
       <label>Zoom <input id="pageZoom" type="range" min="8" max="128" step="1" value="20"> source px / cell</label>
@@ -91,6 +104,12 @@
     </fieldset>
 
     <fieldset>
+      <legend>Colour</legend>
+      <label>Saturation <input id="saturation" type="range" min="0" max="2" step="0.05" value="1"></label>
+      <label>Gamma <input id="gamma" type="range" min="0.5" max="2.5" step="0.05" value="1"></label>
+    </fieldset>
+
+    <fieldset>
       <legend>Layout — edit this once when the wiring is real</legend>
       <label class="toggle"><input type="checkbox" id="snake"><span>Snake (alternate strips reversed)</span></label>
       <label class="toggle"><input type="checkbox" id="flipX"><span>flipX</span></label>
@@ -106,10 +125,19 @@
       <label>Wall wiring (measured)
         <select id="wallLayout"></select>
       </label>
+      <label>Calibration pattern
+        <select id="calibration">
+          <option value="off">off — show the banner feed</option>
+          <option value="all-red">all-red — dead pixels, brownouts</option>
+          <option value="column-sweep">column-sweep — snake direction, strip ends</option>
+          <option value="walk">walk — read the physical order</option>
+          <option value="index-map">index-map — identify every LED</option>
+        </select>
+      </label>
       <div class="row">
         <button id="cycleVariant" type="button">Try next mounting</button>
-        <button id="indexPattern" type="button">Number every LED</button>
       </div>
+      <output id="calOut" class="mono"></output>
       <output id="layoutOut" class="mono"></output>
     </fieldset>
 
@@ -120,6 +148,7 @@
           <option value="sim">Sim only (no wire)</option>
           <option value="broadcast">Broadcast to another tab</option>
           <option value="serial">Web Serial → ESP32</option>
+          <option value="http">HTTP → dev server → WLED (DDP)</option>
         </select>
       </label>
       <label>Baud <input id="baud" type="number" step="100" value="921600"></label>
@@ -138,6 +167,19 @@
   </section>
 </main>
 
-<script type="module" src="./app.js"></script>
+<script type="module">
+  // Dynamic import rather than src="./app.js": a module script whose import fails
+  // runs none of its own code, so the honest symptom of a file:// open is a black
+  // canvas and a console line nobody is looking at. Catching the import makes the
+  // reason visible on the page.
+  try {
+    await import('./app.js');
+  } catch (err) {
+    document.getElementById('bootError').hidden = false;
+    document.getElementById('bootErrorDetail').textContent =
+      `${err.name}: ${err.message}`;
+    throw err; // keep the console error: this page is also under test
+  }
+</script>
 </body>
 </html>

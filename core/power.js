@@ -1,9 +1,10 @@
 /**
  * power — global brightness multiplier + peak-current estimator.
  *
- * Arithmetic: a WS2812B channel draws up to ~20 mA at full on, so one LED at
- * full white is ~60 mA and 400 LEDs at literal full white is ~24 A. The plan's
- * "≈12 A at full white" figure corresponds to about half that (real banner
+ * Arithmetic: these are APA106/PL9823-class beads, but the class nominal is the
+ * same one WS2812 parts use — a channel draws up to ~20 mA at full on, so one
+ * LED at full white is ~60 mA and 400 LEDs at literal full white is ~24 A. The
+ * plan's "≈12 A at full white" figure corresponds to about half that (real banner
  * content never saturates every channel, and 12 A is the number a realistic
  * 5 V supply can actually deliver). Both numbers come out of the same
  * estimator: it is linear in brightness, so the clamp below is what matters,

@@ -1,6 +1,6 @@
 # LED Curtain Wall — Build Plan
 
-*Hardware:* 1m² panel, 400 WS2812B, 20×20 @ 50mm pitch, 3-wire. Data line spliced off the built-in controller to an ESP32.
+*Hardware:* 1m² panel, 400 APA106/PL9823 beads (**not WS2812B** — see firmware/README.md, "Panel identity"), 20×20 @ 50mm pitch, 3-wire. Data line spliced off the built-in controller to an ESP32.
 
 *Architecture:* the browser is the whole brain. It fetches the banner, rasterises it, applies effects, and streams finished frames. The ESP32 is a dumb pixel sink. Sim and wall use the same frame protocol, so nothing is throwaway.
 
@@ -46,21 +46,41 @@ Also define a meta frame (magic 0xA4) for brightness and power budget — see §
 
 Canvas, 20×20 cells scaled up, each cell drawn as a soft radial blob rather than a hard square — that approximates how diffused curtain LEDs actually blend, so what you see on screen matches what you'll get on the wall. Same Panel instance as the wall path. Include a "what the wall actually sees" toggle that renders with the physical index order, so you can preview a wiring mistake before it's installed.
 
+*Colour.* The renderer carries two output stages in `core/color.js`, applied to the
+finished frame before the power clamp — so the estimator and the sim both see the
+bytes that actually leave. **Saturation** pulls each pixel away from its own mean:
+a diffused wall and the eye's own desaturation at high luminance (the
+Bezold–Brücke shift) both wash a pastel toward white, and pure channels are the
+only ones that survive it. **Gamma** is the usual display curve, which deepens
+midtones at the same power draw. Both are host-side; the frame protocol stays raw
+RGB bytes and the sink stays dumb.
+
 ## 5. Transport
 
-Two sinks behind one interface, FrameSink.send(bytes):
-*Sim sink* — straight to canvas, or WebSocket to a second browser tab.
-- *Serial sink* — Web Serial: navigator.serial.requestPort(), 921600, write frames as fast as they're produced, with a frame-rate cap.
+*Sink:* **two, and both work.** The renderer emits the same frozen frame records
+either way, so this is a transport choice, not a code fork:
 
-*Important constraint:* Web Serial requires a secure context. http://localhost and https:// work; plain http://192.168.1.x does *not* get the serial API. So either serve the page over localhost/HTTPS with a cert, or use the WebSocket sink and let the ESP32 take frames over WiFi instead of a cable. Decide this early — it changes the firmware, not the renderer.
+- **Offline — USB.** browser → Web Serial → the sketch → beads, no network at
+  all. The sketch drives the panel itself: the RMT emits the part's real bit
+  timing (350 ns / 1350 ns, a 1.7 µs bit) at 20 MHz resolution, and needs no
+  library. `Adafruit_NeoPixel` cannot express those timings, and NeoPixelBus does
+  not build on ESP32 core 3.x without patching, so the timing is generated here.
+- **Network — DDP.** browser → `tools/serve.js` → DDP/UDP → WLED → beads. WLED
+  drives the beads with its own Apa106 RMT method. Use it when the wall has to be
+  somewhere else, or driven from a phone.
+
+`firmware/README.md`, "Panel identity", carries the evidence for the part, its
+timings, and the order. *Why Web Serial is viable:* it needs a secure context, so
+serve the page from `tools/serve.js`, which binds 127.0.0.1 for exactly that.
 
 ## 6. Power budget
 
-400 WS2812B at full white ≈ 12A at 5V. Realistically you'll never run full white, but the renderer should carry a global brightness multiplier plus a peak-current estimator: comp…
+400 APA106/PL9823 beads at full white ≈ 12A at 5V. Realistically you'll never run full white, but the renderer should carry a global brightness multiplier plus a peak-current estimator: compare the estimate against the firmware's status-line draw.
 1. core/ + tests — framebuffer, layout map, byte packing. Verify a known pattern packs to the expected 1200 bytes.
 2. Canvas sim scrolling live text from a local page.
 3. Power estimator + brightness clamp.
-4. Serial sink + firmware, wall lit.
+4. Sink + wall lit — offline over USB (Web Serial), and over the network via WLED
+   and DDP (see §5).
 5. Layout calibration pass against the real panel using the physical-order preview.
 
 Milestone 1 is the one worth doing today — it's pure logic, fully testable, and everything else hangs off it.

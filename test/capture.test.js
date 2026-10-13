@@ -1,9 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createServer as netServer } from 'node:net';
-import { spawn, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+
+import {
+  PNG_SIGNATURE,
+  waitFor,
+  freePort,
+  startServe,
+  captureQuery,
+  pngSize,
+} from './harness.js';
 
 import {
   Capture,
@@ -25,19 +32,6 @@ import {
  * Anything needing a browser is skipped, never failed, where none is installed.
  */
 
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const SERVE_SCRIPT = fileURLToPath(new URL('../tools/serve.js', import.meta.url));
-
-
-/** Poll a condition until it holds or the deadline passes; returns the final value. */
-async function waitFor(predicate, timeoutMs = 10_000, stepMs = 100) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (predicate()) return true;
-    if (Date.now() >= deadline) return false;
-    await new Promise((done) => setTimeout(done, stepMs));
-  }
-}
 
 // -------------------------------------------------------------------------
 // URL policy
@@ -185,8 +179,11 @@ async function startPageServer() {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(html);
   });
-  await new Promise((done) => server.listen(0, '127.0.0.1', done));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  // Explicit port rather than listen(0): Chromium refuses the fetch standard's
+  // blocked ports, and an ephemeral one can land there.
+  const port = await freePort();
+  await new Promise((done, fail) => server.once('error', fail).listen(port, '127.0.0.1', done));
+  const base = `http://127.0.0.1:${port}`;
   return {
     server,
     url: `${base}/`,
@@ -195,7 +192,6 @@ async function startPageServer() {
   };
 }
 
-const pngSize = (png) => ({ w: png.readUInt32BE(16), h: png.readUInt32BE(20) });
 
 test('a real Chromium captures a tall page top-to-bottom', async (t) => {
   if (findChrome() === null) {
@@ -389,66 +385,6 @@ test('a tab left dead by a failed shot is released, not held forever', async (t)
 // GET /capture — the HTTP contract the browser app reads
 // -------------------------------------------------------------------------
 
-/** Ask the OS for a port, release it, and hope nothing steals it before serve.js binds. */
-function freePort() {
-  return new Promise((done, fail) => {
-    const probe = netServer();
-    probe.once('error', fail);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => done(port));
-    });
-  });
-}
-
-/**
- * Boot tools/serve.js as a real child process on an ephemeral port.
- *
- * Killing it is platform-specific and matters: on Windows a plain child.kill()
- * terminates only the Node process, so the Chromium it launched would survive as
- * an orphan. taskkill /T takes the whole tree. On POSIX, SIGTERM reaches the
- * handler that already closes the Capture.
- */
-async function startServe(port) {
-  const child = spawn(process.execPath, [SERVE_SCRIPT, '--port', String(port)], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-  let log = '';
-  child.stdout.on('data', (chunk) => { log += chunk; });
-  child.stderr.on('data', (chunk) => { log += chunk; });
-  const ready = /LED wall dev server: http/;
-  await new Promise((done, fail) => {
-    const timer = setTimeout(() => fail(new Error(`serve.js did not start: ${log}`)), 15_000);
-    const check = () => {
-      if (!ready.test(log)) return false;
-      clearTimeout(timer);
-      done();
-      return true;
-    };
-    child.stdout.on('data', check);
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      fail(new Error(`serve.js exited early (${code}): ${log}`));
-    });
-    check();
-  });
-  return {
-    base: `http://127.0.0.1:${port}`,
-    async stop() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      if (process.platform === 'win32') {
-        spawnSync('taskkill', ['/F', '/T', '/PID', String(child.pid)], { stdio: 'ignore', windowsHide: true });
-      } else {
-        child.kill('SIGTERM');
-      }
-      await new Promise((done) => child.once('exit', done));
-    },
-  };
-}
-
-const captureQuery = (params) => new URLSearchParams(params).toString();
-
 test('GET /capture answers bad parameters with 400 JSON and never throws', async () => {
   const port = await freePort();
   const serve = await startServe(port);
@@ -575,8 +511,9 @@ test('a viewport-dependent page: the PNG always matches the geometry reported fo
 <div id="grow"></div>
 `);
   });
-  await new Promise((done) => server.listen(0, '127.0.0.1', done));
-  const url = `http://127.0.0.1:${server.address().port}/`;
+  const port = await freePort();
+  await new Promise((done, fail) => server.once('error', fail).listen(port, '127.0.0.1', done));
+  const url = `http://127.0.0.1:${port}/`;
 
   const capture = new Capture({ idleMs: 5000 });
   try {

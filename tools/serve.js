@@ -14,6 +14,9 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
 import { Capture, parseCaptureParams } from './capture.js';
+import { isFetchablePort } from './ports.js';
+import { FRAME_BYTES } from '../core/frame.js';
+import { DdpTransport } from './bridge.js';
 
 const HOST = '127.0.0.1';
 const DEFAULT_PORT = 8080;
@@ -49,9 +52,11 @@ function resolvePort(argv) {
       flag = argv[++i];
     } else if (arg.startsWith('--port=')) {
       flag = arg.slice('--port='.length);
+    } else if (arg === '--ddp') {
+      i++; // consumed by resolveDdpTarget; accepted here so one argv carries both
     } else {
       console.error(`serve: unknown argument ${arg}`);
-      console.error('usage: node tools/serve.js [--port <port>]');
+      console.error('usage: node tools/serve.js [--port <port>] [--ddp <host>]');
       process.exit(2);
     }
   }
@@ -60,6 +65,14 @@ function resolvePort(argv) {
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     console.error(`serve: invalid port ${JSON.stringify(raw)}`);
+    process.exit(2);
+  }
+  if (!isFetchablePort(port)) {
+    // Binding succeeds on these ports and then nothing can connect to them: the
+    // fetch standard (and Chromium) refuse them outright, so the server would
+    // print a URL that is guaranteed to fail. Refusing here is the honest error.
+    console.error(`serve: port ${port} is unreachable by design — browsers refuse it.`);
+    console.error('Pick any other port, e.g. --port 8080');
     process.exit(2);
   }
   return port;
@@ -178,15 +191,59 @@ async function handleCapture(req, res, url) {
   }
 }
 
+/**
+ * POST /frame — one record from the page, forwarded to the wall as DDP.
+ *
+ * The page cannot send UDP, so the socket lives here: the app's http sink posts
+ * the same 1203-byte record the serial sink would write, and this hands it to the
+ * same DdpTransport the bridge uses. Off unless --ddp names a target, so a plain
+ * `npm run serve` behaves exactly as before.
+ *
+ * The size cap is the protocol's own frame size: anything larger is not a record
+ * this server should be forwarding, and reading it whole to find that out would
+ * be the only unbounded buffer in the process.
+ */
+async function handleFrame(req, res) {
+  if (ddp === null) {
+    respond(res, 503, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no --ddp target\n');
+    return;
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > FRAME_BYTES) {
+      req.destroy();
+      respond(res, 413, { 'Content-Type': 'text/plain; charset=utf-8' }, 'record too large\n');
+      return;
+    }
+    chunks.push(chunk);
+  }
+  if (ddp.send(Buffer.concat(chunks))) {
+    respond(res, 204, {}, '');
+  } else {
+    respond(res, 503, { 'Content-Type': 'text/plain; charset=utf-8' }, 'record refused\n');
+  }
+}
+
 const server = createServer(async (req, res) => {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    respond(res, 405, { Allow: 'GET, HEAD', 'Content-Type': 'text/plain; charset=utf-8' }, 'Method not allowed\n');
+  // GET/HEAD serve files; POST is only the frame upload from the page.
+  if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
+    respond(res, 405, { Allow: 'GET, HEAD, POST', 'Content-Type': 'text/plain; charset=utf-8' }, 'Method not allowed\n');
     return;
   }
 
   // Base is a dummy: only the pathname and the query string matter here, and a
   // fixed base keeps this independent of the port actually bound.
   const url = new URL(req.url ?? '/', `http://${HOST}`);
+  if (req.method === 'POST') {
+    if (url.pathname === '/frame') {
+      await handleFrame(req, res);
+      return;
+    }
+    respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, `404 Not Found: ${req.url}\n`);
+    return;
+  }
   if (url.pathname === '/capture') {
     await handleCapture(req, res, url);
     return;
@@ -211,6 +268,23 @@ const server = createServer(async (req, res) => {
     }
   }
 });
+
+/** --ddp <host[:port]>: where POST /frame forwards to. Absent means the route is off. */
+function resolveDdpTarget(argv) {
+  const i = argv.indexOf('--ddp');
+  if (i < 0) return null;
+  const value = argv[i + 1];
+  if (value === undefined) {
+    console.error('serve: --ddp needs a host, e.g. --ddp 192.168.1.118');
+    process.exitCode = 1;
+    return null;
+  }
+  return value;
+}
+
+const ddpHost = resolveDdpTarget(process.argv.slice(2));
+const ddp = ddpHost === null ? null : await new DdpTransport({ host: ddpHost }).open();
+if (ddp !== null) console.log(`serve: POST /frame -> DDP ${ddp.host}:${ddp.port}`);
 
 const port = resolvePort(process.argv.slice(2));
 

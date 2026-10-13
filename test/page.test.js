@@ -18,8 +18,40 @@ const PNG = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
 ]);
 
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+// Captured before any test can replace globalThis.setTimeout (see withTimerSpy),
+// so the suites' own sleeps never look like poller timers.
+const nativeSetTimeout = globalThis.setTimeout;
+const sleep = (ms) => new Promise((done) => nativeSetTimeout(done, ms));
 
+/**
+ * The poller's scheduling decision, measured at the source.
+ *
+ * A wall-clock gap is `capture + requested idle + event-loop latency`, and the
+ * last term is unbounded: on this machine a `setTimeout(0)` fired 97 ms late
+ * while the Chromium suite ran alongside this file. Gaps can therefore prove
+ * "no overlap" and "no backlog", but never how much idle the poller *asked
+ * for* — which is the actual contract. This spy records that, armed only in the
+ * window between one capture resolving and the next one starting, which is
+ * exactly where page.js's decision is made (and where nothing else schedules a
+ * timer: the chain from fetch to `setTimeout` is all microtasks).
+ */
+const pollTimers = { armed: false, delays: [] };
+
+async function withTimerSpy(run) {
+  const saved = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, delay, ...rest) => {
+    if (pollTimers.armed) pollTimers.delays.push(delay ?? 0);
+    return nativeSetTimeout(fn, delay, ...rest);
+  };
+  pollTimers.armed = true;
+  pollTimers.delays = [];
+  try {
+    return await run();
+  } finally {
+    globalThis.setTimeout = saved;
+    pollTimers.armed = false;
+  }
+}
 /**
  * Stand in for the /capture route, recording when each request started and how
  * many were in flight at once. `maxInflight` is the number that matters: a
@@ -28,6 +60,7 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
  */
 function fakeCapture({ latencyMs = 0, fail = false } = {}) {
   const started = [];
+  const durations = [];
   let inflight = 0;
   let maxInflight = 0;
   let n = 0;
@@ -56,6 +89,7 @@ function fakeCapture({ latencyMs = 0, fail = false } = {}) {
         },
       });
     } finally {
+      durations.push(Date.now() - t0);
       inflight -= 1;
     }
   };
@@ -68,6 +102,10 @@ function fakeCapture({ latencyMs = 0, fail = false } = {}) {
     /** Millisecond gaps between consecutive capture starts. */
     get gaps() {
       return started.slice(1).map((t, i) => t - started[i]);
+    },
+    /** How long each capture actually took, including whatever the machine added. */
+    get durations() {
+      return durations;
     },
     get maxInflight() {
       return maxInflight;
@@ -104,6 +142,30 @@ function withBrowserApis(fetchImpl) {
   return () => Object.assign(globalThis, saved);
 }
 
+/**
+ * The default poll period is the app's refresh rate, so it is a contract, not a
+ * tuning knob: 500 ms made a live page reach the wall at 2 Hz while the wall ran
+ * at 30 fps, which is the "not smooth" report. Measured on this machine against
+ * the real capture route: 500 ms -> 4.4 captures/s, 150 ms -> 8.3, 100 ms -> 8.6.
+ * Throughput saturates near 8.5 captures/s because shots are serialised on one
+ * tab, so 150 ms is the knee — the fastest default that buys real frames.
+ */
+test('the default poll period sits at the capture route knee, not at 500 ms', () => {
+  const restore = withBrowserApis(null);
+  try {
+    const source = new PageSource({ url: 'http://127.0.0.1/page' });
+    assert.equal(source.intervalMs, 150, 'the shipped default is the measured knee');
+    assert.ok(source.intervalMs < 500, '500 ms is what made a live page a slideshow');
+    assert.ok(source.intervalMs >= 100, 'below the floor the poller only queues behind the tab');
+
+    // An explicit interval is honoured, so the UI field is a real control.
+    assert.equal(new PageSource({ url: 'http://127.0.0.1/page', intervalMs: 400 }).intervalMs, 400);
+    assert.equal(new PageSource({ url: 'http://127.0.0.1/page', intervalMs: 1 }).intervalMs, 100);
+  } finally {
+    restore();
+  }
+});
+
 test('the poll loop never overlaps captures', async () => {
   const restore = withBrowserApis(null);
   try {
@@ -131,24 +193,67 @@ test('the poll loop never overlaps captures', async () => {
 test('intervalMs is a minimum gap between captures, not a firing rate', async () => {
   const restore = withBrowserApis(null);
   try {
-    const fake = fakeCapture({ latencyMs: 150 });
-    globalThis.fetch = fake.fetchImpl;
-    const source = new PageSource({ url: 'http://127.0.0.1/page', intervalMs: 40 });
+    // What is asserted is the delay page.js *requests*, not the wall-clock gap.
+    // A gap is `capture + requested idle + event-loop latency`, and the last term
+    // is unbounded on a loaded machine, so it cannot bound the idle term. The
+    // requested delay is the contract, and it is the only thing that separates
+    // "minimum gap" from "fixed rate": a fixed-rate poller adds a whole interval
+    // on top of every slow capture and queues a backlog behind it.
+    //
+    // `intervalMs` 40 is clamped up to the 100ms floor by the constructor, so the
+    // effective interval is read back from the source rather than assumed.
+    const slow = await withTimerSpy(async () => {
+      const fake = fakeCapture({ latencyMs: 150 });
+      globalThis.fetch = fake.fetchImpl;
+      const source = new PageSource({ url: 'http://127.0.0.1/page', intervalMs: 40 });
+      source.start();
+      await sleep(800);
+      source.stop();
+      return { fake, interval: source.intervalMs };
+    });
 
-    source.start();
-    await sleep(800);
-    source.stop();
+    assert.ok(slow.fake.gaps.length >= 2, `expected several captures, got ${slow.fake.calls}`);
+    // One scheduling decision per completed capture; the one after the last
+    // capture may or may not have been armed before stop() cleared it, so the
+    // pairing is asserted over the gaps that actually happened.
+    assert.ok(
+      pollTimers.delays.length >= slow.fake.gaps.length,
+      `expected a scheduling decision per gap, got ${pollTimers.delays.length} for ${slow.fake.gaps.length} gaps`,
+    );
+    for (let i = 0; i < slow.fake.gaps.length; i += 1) {
+      const delay = pollTimers.delays[i];
+      const duration = slow.fake.durations[i];
+      assert.ok(
+        delay <= Math.max(0, slow.interval - duration) + 5,
+        `capture ${i + 1} waited ${delay}ms after a ${duration}ms capture; ` +
+          `a ${slow.interval}ms interval already elapsed during it`,
+      );
+      const idle = slow.fake.gaps[i] - duration;
+      assert.ok(
+        idle >= -25,
+        `capture ${i + 1} started ${-idle}ms before capture ${i} finished: the poller is queueing a backlog`,
+      );
+    }
 
-    const slowest = Math.max(...fake.gaps);
-    assert.ok(
-      slowest < 150 + 120,
-      `a slow capture must not queue the next one behind a backlog: max gap ${slowest}ms`,
-    );
-    const fastest = Math.min(...fake.gaps);
-    assert.ok(
-      fastest >= 150 * 0.6,
-      `gap ${fastest}ms should track the ${150}ms capture time, not the 40ms interval`,
-    );
+    // The other half: when the page is fast, the interval is actually honoured.
+    // Without this, a poller that always requested 0ms would pass the slow case.
+    const fast = await withTimerSpy(async () => {
+      const fake = fakeCapture();
+      globalThis.fetch = fake.fetchImpl;
+      const source = new PageSource({ url: 'http://127.0.0.1/page', intervalMs: 100 });
+      source.start();
+      await sleep(500);
+      source.stop();
+      return { fake, interval: source.intervalMs };
+    });
+
+    assert.ok(fast.fake.gaps.length >= 2, `expected several captures, got ${fast.fake.calls}`);
+    for (const delay of pollTimers.delays) {
+      assert.ok(
+        delay >= fast.interval - 25 && delay <= fast.interval,
+        `expected ~${fast.interval}ms of idle between fast captures, the poller asked for ${delay}ms`,
+      );
+    }
   } finally {
     restore();
   }

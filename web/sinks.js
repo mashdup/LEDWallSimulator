@@ -22,7 +22,7 @@
 
 import { FRAME_BYTES, FRAME_MAGIC, META_BYTES, META_MAGIC } from '../core/frame.js';
 
-/** Wire rate; must match firmware/sketch.ino's -D BAUD=921600. */
+/** Wire rate; must match firmware/firmware.ino's -D BAUD=921600. */
 export const DEFAULT_BAUD = 921600;
 
 /**
@@ -355,8 +355,76 @@ export class SerialSink extends FrameSink {
   };
 }
 
+/**
+ * HttpSink — frames to the local dev server, which forwards them to the wall as
+ * DDP. A browser cannot send UDP, so this is the only way the page itself can
+ * drive WLED: tools/serve.js owns the socket.
+ *
+ * Meta records are forwarded too, unchanged. The server's DDP transport applies a
+ * meta record's brightness to the frames that follow it, which is exactly what
+ * the firmware does with it — so the page's brightness slider keeps working.
+ *
+ * Backpressure matches every other sink: at most maxInFlight requests outstanding,
+ * and a frame is dropped rather than queued, because a growing queue means the
+ * wall is displaying a frame from seconds ago.
+ */
+export class HttpSink extends FrameSink {
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.url] endpoint the dev server exposes
+   * @param {number} [opts.maxInFlight] requests outstanding at once
+   */
+  constructor({ url = '/frame', maxInFlight = MAX_IN_FLIGHT } = {}) {
+    super('http');
+    this.url = url;
+    this.maxInFlight = maxInFlight;
+    this.inFlight = 0;
+    /** Human-readable reason for the last failure, for the connect UI. */
+    this.lastError = null;
+    this.stats.bytes = 0;
+    this.stats.errors = 0;
+  }
+
+  send(bytes) {
+    const kind = classify(bytes);
+    if (kind === null) {
+      this.stats.rejected++;
+      return false;
+    }
+    if (this.inFlight >= this.maxInFlight) {
+      this.stats.dropped++;
+      return false;
+    }
+    this.inFlight += 1;
+    this.stats.sent += 1;
+    if (kind === 'meta') this.stats.meta += 1;
+    this.stats.bytes += bytes.length;
+    // A copy: fetch reads the body asynchronously, and the renderer reuses its
+    // buffer for the next frame, so aliasing it would post whatever is current
+    // when the request is finally serialised.
+    const body = bytes.slice();
+    fetch(this.url, {
+      method: 'POST',
+      body,
+      headers: { 'Content-Type': 'application/octet-stream' },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        this.lastError = null;
+      })
+      .catch((err) => {
+        this.stats.errors += 1;
+        this.lastError = reason(err);
+      })
+      .finally(() => {
+        this.inFlight -= 1;
+      });
+    return true;
+  }
+}
+
 /** Every sink kind openSink() understands. */
-export const SINK_KINDS = ['sim', 'broadcast', 'serial'];
+export const SINK_KINDS = ['sim', 'broadcast', 'serial', 'http'];
 
 /**
  * Build a sink, and for the serial kind connect it.
@@ -365,7 +433,7 @@ export const SINK_KINDS = ['sim', 'broadcast', 'serial'];
  * context, no port chosen, port held by another program). 'sim' and 'broadcast'
  * degrade instead of throwing, so a renderer can always draw.
  *
- * @param {'sim'|'broadcast'|'serial'} kind
+ * @param {'sim'|'broadcast'|'serial'|'http'} kind
  * @param {object} [opts] forwarded to the sink's constructor
  * @returns {Promise<FrameSink>}
  */
@@ -375,6 +443,8 @@ export async function openSink(kind, opts = {}) {
       return new SimSink(opts);
     case 'broadcast':
       return new BroadcastSink(opts);
+    case 'http':
+      return new HttpSink(opts);
     case 'serial': {
       const sink = new SerialSink(opts);
       await sink.open();

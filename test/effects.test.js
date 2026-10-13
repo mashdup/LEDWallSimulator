@@ -2,13 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { Panel } from '../core/panel.js';
-import { Layout, identity } from '../core/layout.js';
 import {
   applyBrightness,
   blend,
   wipe,
   gradient,
-  physicalIndexPattern,
 } from '../core/effects.js';
 
 const grey = (p, x, y) => p.getPixel(x, y)[0];
@@ -238,56 +236,3 @@ test('gradient on a single-cell axis does not divide by zero', () => {
   assert.deepEqual(p.getPixel(0, 0), [10, 10, 10]);
 });
 
-// -------------------------------------------------------------------------
-// physicalIndexPattern — the wiring self-test
-// -------------------------------------------------------------------------
-
-test('physicalIndexPattern numbers cells by PHYSICAL index, greyscale', () => {
-  const layout = new Layout(); // serpentine: row 1 runs backwards
-  const p = new Panel();
-  physicalIndexPattern(p, layout);
-
-  const scale = 255 / 399;
-  for (const [x, y, physical] of [[0, 0, 0], [1, 0, 1], [19, 0, 19], [0, 1, 39], [19, 1, 20], [0, 19, 399]]) {
-    const expected = Math.round(physical * scale);
-    assert.deepEqual(p.getPixel(x, y), [expected, expected, expected], `cell ${x},${y} (physical ${physical})`);
-  }
-});
-
-test('the pattern follows the layout, not the grid order', () => {
-  // Same panel, two wiring guesses: the darkest and brightest cells move.
-  const snake = new Panel();
-  const straight = new Panel();
-  physicalIndexPattern(snake, new Layout());
-  physicalIndexPattern(straight, identity());
-
-  assert.notDeepEqual(snake.getPixel(0, 1), straight.getPixel(0, 1));
-  // identity: physical 399 is the last cell in row order, (19,19).
-  assert.equal(grey(straight, 19, 19), 255);
-  // serpentine: row 19 is reversed, so physical 399 sits at (0,19).
-  assert.equal(grey(snake, 0, 19), 255);
-  assert.equal(grey(snake, 19, 19), Math.round(380 * (255 / 399)));
-});
-
-test('the pattern uses the whole 0..255 range whatever the wiring guess', () => {
-  // Layout changes where each value lands, never which values appear — so a
-  // photo of the wall reads as a numbering, not as a different palette.
-  const values = (layout) => {
-    const p = new Panel();
-    physicalIndexPattern(p, layout);
-    const seen = [];
-    for (let i = 0; i < p.pixels.length; i += 3) seen.push(p.pixels[i]);
-    return seen.sort((a, b) => a - b);
-  };
-  assert.deepEqual(values(new Layout()), values(identity()));
-  assert.deepEqual(values(new Layout({ flipX: true })), values(identity()));
-});
-
-test('physicalIndexPattern keeps channels equal', () => {
-  const p = new Panel();
-  physicalIndexPattern(p, new Layout());
-  for (let i = 0; i < p.pixels.length; i += 3) {
-    assert.equal(p.pixels[i], p.pixels[i + 1]);
-    assert.equal(p.pixels[i + 1], p.pixels[i + 2]);
-  }
-});

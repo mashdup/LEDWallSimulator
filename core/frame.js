@@ -203,3 +203,17 @@ export class FrameDecoder {
 function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
 }
+
+/**
+ * True when two byte arrays are identical.
+ *
+ * The cheap test behind "only send what changed": a wall holds whatever it was
+ * last sent, so an identical strip is pure traffic. Compares the whole array, so
+ * callers wanting to ignore a sequence number must pass the payload range.
+ */
+export function sameBytes(a, b) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}

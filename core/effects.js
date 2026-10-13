@@ -89,7 +89,7 @@ export function wipe(from, to, t, opts = {}) {
   return out;
 }
 
-/** Uniform colour ramp, for the wiring self-test and calibration patterns. */
+/** Uniform colour ramp, for transitions and calibration helpers. */
 export function gradient(panel, { from = [0, 0, 0], to = [255, 255, 255], axis = 'x' } = {}) {
   const { cols, rows } = panel;
   const span = axis === 'y' ? Math.max(1, rows - 1) : Math.max(1, cols - 1);
@@ -106,23 +106,6 @@ export function gradient(panel, { from = [0, 0, 0], to = [255, 255, 255], axis =
   return panel;
 }
 
-/**
- * Number every LED with its PHYSICAL index as a greyscale value, so a photo of
- * the wall tells you the wiring order directly.
- */
-export function physicalIndexPattern(panel, layout) {
-  const p = panel.pixels;
-  const map = layout.map;
-  const scale = 255 / Math.max(1, layout.count - 1);
-  for (let cell = 0; cell < layout.count; cell++) {
-    const v = Math.round(map[cell] * scale);
-    const i = cell * BYTES_PER_PIXEL;
-    p[i] = v;
-    p[i + 1] = v;
-    p[i + 2] = v;
-  }
-  return panel;
-}
 
 function clamp01(v) {
   return v < 0 ? 0 : v > 1 ? 1 : v;

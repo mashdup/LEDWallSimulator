@@ -5,8 +5,8 @@
  * the only reason it exists is that it draws it *like a wall*. Two things have
  * to be right or the preview lies:
  *
- *   - Each cell is a SOFT RADIAL BLOB, not a hard square. A WS2812B behind a
- *     diffuser is a light patch roughly a cell and a half across, and two
+ *   - Each cell is a SOFT RADIAL BLOB, not a hard square. An APA106/PL9823 bead
+ *     behind a diffuser is a light patch roughly a cell and a half across, and two
  *     neighbouring patches SUM. Hard squares make a banner look crisp on screen
  *     and mushy on the wall — exactly the surprise the sim is supposed to
  *     remove. Blobs are composited with 'lighter' so overlapping light adds.

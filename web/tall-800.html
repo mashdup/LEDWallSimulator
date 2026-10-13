@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>tall pan fixture</title>
+<style>
+  /* Black page, one green bar. Pure geometry: no text, no fonts, no antialiasing,
+     so a test can compute the lit row from SPEED and nothing else. */
+  html, body { margin: 0; background: #000; }
+  #page { position: relative; height: 800px; }
+  #bar { position: absolute; left: 0; width: 400px; height: 20px; background: #0f0; }
+</style>
+<div id="page"><div id="bar"></div></div>
+<script>
+  /**
+   * tall-800.html — a page TALLER THAN THE GRID, for testing the pan.
+   *
+   * anim-400.html is 400x400: at 20 px per cell it is exactly 20x20 cells, so its
+   * pan span is 0 and it cannot show what happens when a live page is re-shot while
+   * the wall is scrolling. This page is 800 px tall, so a 400x800 capture is 20x40
+   * cells and the window has 20 cells to walk.
+   *
+   * The page is exactly as tall as the capture the tests ask for. tools/capture.js
+   * resizes the viewport to the page's scrollHeight (capped at maxCssHeight) and
+   * shoots with `captureBeyondViewport: false`, so an 800 px page is captured whole
+   * and the capture's own height is what sets the pan span.
+   *
+   * One bar sweeps downward at a fixed rate, so the row the wall is showing is
+   * derivable: barRow(t) = SPEED*t/CELL, and the row on the wall is
+   * barRow(t) - panner.offset.
+   *
+   * NOTE on what a pan reset looks like: it makes `barRow - offset` jump FORWARD,
+   * because subtracting a reset-to-zero offset is subtracting less. Measured on the
+   * pre-fix loop: 24 offset decreases produced only ONE backward lit-row jump. So
+   * the lit row corroborates that the sweep moves; `panner.offset` is what proves
+   * the pan keeps its position.
+   *
+   * `?speed=<px/s>` overrides the rate (default 200 px/s = 10 cells/s at the 20 px
+   * per cell the tests use; the pan test uses 140). The bar wraps at PAGE - BAR_H.
+   */
+  const SPEED = Number(new URLSearchParams(location.search).get('speed')) || 200;
+  const PAGE = 800;
+  const BAR_H = 20;
+  const bar = document.getElementById('bar');
+  const t0 = performance.now();
+  function frame() {
+    const y = ((performance.now() - t0) / 1000 * SPEED) % (PAGE - BAR_H);
+    bar.style.top = y.toFixed(0) + 'px';
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+</script>

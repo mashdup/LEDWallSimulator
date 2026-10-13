@@ -1,0 +1,122 @@
+<!doctype html>
+<!--
+  anim-400.html — the 400x400 animated page, as a permanent fixture.
+
+  400x400 is the interesting size for this wall: at 20 source px per cell it is
+  exactly 20x20 cells, so the whole page lands on the grid with nothing left over
+  to pan. Framing is therefore static (Panner.span is 0) and the only motion on the
+  wall is the page's own animation arriving as a fresh capture. This page exists so
+  that claim is testable rather than anecdotal — see test/anim-page.test.js.
+
+  SERVE IT. Opening this file with file:// shows an error, not the scene: Chromium
+  treats a file:// ES module import as cross-origin and refuses it, so the fixture
+  must come off the dev server — `npm run serve`, then
+  http://127.0.0.1:8080/anim-400.html (or whatever port the server reports).
+
+  The scene itself lives in anim-400.js so the test can import the same geometry
+  instead of redrawing it. This file is only the canvas shell.
+
+  Two modes:
+
+    ?t=<seconds>   paint the single frame at that time and stop. Deterministic: the
+                   geometry is a pure function of t, so a test can capture it through
+                   the real Chromium route and assert which panel cells are lit. No
+                   rAF, no wall-clock race.
+    (no ?t)        animate. Time-based rather than frame-based, so bar speed is px
+                   per wall-clock second and the wall's sampling of it can be
+                   measured against a known rate.
+
+  ?t=2/3 is the reference frame: 80 px and 60 px put the red bar on cells 4-5 and
+  the green bar on row 3, both exactly, with no partially covered cells.
+-->
+<meta charset="utf-8">
+<title>400x400 animated fixture</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+  canvas { display: block; width: 400px; height: 400px; }
+</style>
+<canvas id="c" width="400" height="400"></canvas>
+<script type="module">
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  /**
+   * A module whose import fails runs NONE of its own code, so the honest symptom
+   * of a file:// open is a black 400x400 box and a console line nobody is looking
+   * at. Paint the reason instead: the fixture is only useful through the capture
+   * route, and that route is the dev server anyway.
+   */
+  function explain(err) {
+    ctx.fillStyle = '#12060a';
+    ctx.fillRect(0, 0, 400, 400);
+    ctx.fillStyle = '#ff5c5c';
+    ctx.font = '15px system-ui, sans-serif';
+    const lines = [
+      'anim-400.html must be served, not opened from disk.',
+      '',
+      'npm run serve',
+      '  then open http://127.0.0.1:8080/anim-400.html',
+      '',
+      'file:// blocks the ES module import of anim-400.js:',
+    ];
+    let y = 40;
+    for (const line of lines) {
+      ctx.fillText(line, 18, y);
+      y += 22;
+    }
+    ctx.fillStyle = '#8a95a3';
+    ctx.font = '13px ui-monospace, Consolas, monospace';
+    let line = '';
+    const detail = String(err && err.message ? err.message : err);
+    // The browser's own wording is long and unhelpful on one line; wrap it so it
+    // is at least readable instead of clipped at the canvas edge.
+    for (const word of detail.split(' ')) {
+      if (line && ctx.measureText(line + word).width > 364) {
+        ctx.fillText(line, 18, y);
+        y += 18;
+        line = '';
+      }
+      line += word + ' ';
+    }
+    if (line) ctx.fillText(line, 18, y);
+  }
+
+  let scene;
+  try {
+    scene = await import('./anim-400.js');
+  } catch (err) {
+    explain(err);
+    throw err; // keep the console error too: this page is a test fixture
+  }
+
+  const { W, H, frameRgba } = scene;
+
+  // ImageData requires a Uint8ClampedArray, so the buffer is allocated clamped and
+  // handed to frameRgba, which accepts either flavour.
+  const pixels = new Uint8ClampedArray(W * H * 4);
+
+  /** Paint one frame. putImageData is pixel-exact: no subpixel blending to hide behind. */
+  function draw(t) {
+    frameRgba(t, pixels);
+    ctx.putImageData(new ImageData(pixels, W, H), 0, 0);
+  }
+
+  const at = new URLSearchParams(location.search).get('t');
+  if (at !== null) {
+    // Deterministic single frame. A non-numeric t draws frame 0 rather than
+    // silently animating, so a mistyped URL cannot look like a passing test.
+    const t = Number(at);
+    draw(Number.isFinite(t) ? t : 0);
+  } else {
+    // Wall-clock based, not frame counted: frames / 60 would slow the bars down
+    // whenever rAF is throttled (backgrounded tab, slow machine), which would make
+    // the wall's measured sampling rate depend on the browser's frame budget rather
+    // than on the speed the scene declares.
+    const started = performance.now();
+    const tick = () => {
+      draw((performance.now() - started) / 1000);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+</script>
