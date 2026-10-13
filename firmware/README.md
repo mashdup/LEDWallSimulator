@@ -565,7 +565,30 @@ silently block the wall until the stream is stopped and restarted. Looking at
 the page at 192.168.1.118 is harmless — reads do not touch it. Do not *change*
 anything there while a stream is running.
 
+**Localising an output fault.** No counter on the device can see whether light
+comes out, and `est`/`state=live`/`rmt=1` are all satisfied by a sketch that
+decodes frames perfectly onto a pin connected to nothing. The only test that
+splits "the bytes are wrong" from "the beads are not listening" is to send one
+channel at a time and look:
+
+```sh
+node tools/channels.js COM6
+```
+
+It steps RED, GREEN, BLUE, WHITE, OFF, then repeats red and blue, three seconds
+each, over a solid field — while printing the device's `frames`, `seq`, `disc`,
+`rewind`, `gaps`, `state` and `boots` on the same port. Read both at once:
+counters climbing with a colour missing localises the fault to that channel's
+mapping or its output stage; counters climbing with **nothing** on the panel
+means the data line is not on `PIN_DATA` at all.
+
+Measured with it: 454 frames across all seven phases, `disc=0 rewind=0 gaps=0`,
+`state=live`, `boots` unchanged — so a host stream does not crash this sketch and
+the decoder keeps up. That is what cleared the firmware of a crash-reset theory
+for a panel that went dark mid-session.
+
 ---
+
 
 ## Compilation status
 
