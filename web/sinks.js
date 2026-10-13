@@ -434,8 +434,21 @@ export class AdalightSink extends SerialPortSink {
   encode(bytes, kind) {
     if (kind !== 'frame') return null;
 
-    const hi = (LED_COUNT >> 8) & 0xff;
-    const lo = LED_COUNT & 0xff;
+    /*
+     * The header carries the LED count MINUS ONE — that is Adalight's convention,
+     * not an off-by-one. WLED's parser (wled00/wled_serial.cpp) does
+     * `count += next + 1` while reading the two count bytes, then consumes
+     * exactly `count` pixels.
+     *
+     * Send the raw count and WLED reads one pixel past the payload: it swallows
+     * the next frame's first three header bytes, so that frame's header never
+     * matches and the whole record is discarded as garbage. The result is frames
+     * landing intermittently — flicker — while every byte of every frame that
+     * does sync is perfectly correct, and WLED's strip buffer reads back clean.
+     */
+    const n = LED_COUNT - 1;
+    const hi = (n >> 8) & 0xff;
+    const lo = n & 0xff;
     const out = new Uint8Array(ADALIGHT_HEADER + RGB_BYTES);
     out[0] = 0x41; // 'A'
     out[1] = 0x64; // 'd'

@@ -635,7 +635,7 @@ test('the adalight sink frames a record the way WLED expects', async () => {
     assert.deepEqual([...out.subarray(0, 3)], [0x41, 0x64, 0x61], "'A' 'd' 'a'");
     const hi = out[3];
     const lo = out[4];
-    assert.equal((hi << 8) | lo, LED_COUNT, 'the header carries the LED count');
+    assert.equal((hi << 8) | lo, LED_COUNT - 1, "WLED reads `count + 1` pixels: the header carries the count MINUS ONE");
     assert.equal(out[5], hi ^ lo ^ 0x55, 'and the checksum WLED verifies');
     assert.deepEqual(
       [...out.subarray(6)],
