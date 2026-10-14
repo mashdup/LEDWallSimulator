@@ -71,6 +71,7 @@ banner.start();
 
 const page = new PageSource({
   url: $('pageUrl').value,
+  endpoint: $('pageEndpoint').value,
   intervalMs: Number($('pagePoll').value),
   width: Number($('pageW').value),
   height: Number($('pageH').value),
@@ -559,10 +560,17 @@ $('pageUrl').addEventListener('change', () => {
   // than re-shooting whatever the capture tab still has open.
   page.refresh(true).then(buildPanner);
 });
+$('pageEndpoint').addEventListener('change', () => {
+  // '/capture' photographs any URL (60-90 ms per shot, ~10 fps ceiling);
+  // '/content/frame' serves the content page's own pushed canvas (a few ms,
+  // ~30 fps). The query string PageSource appends is ignored by the push
+  // route, so no other setting changes between the two modes.
+  page.endpoint = $('pageEndpoint').value;
+  page.refresh(true).then(buildPanner);
+});
 for (const [id, key] of [['pagePoll', 'intervalMs'], ['pageW', 'width'], ['pageH', 'height'], ['pageWait', 'waitMs']]) {
   $(id).addEventListener('change', () => {
-    page[key] = Number($(id).value);
-    if (key === 'intervalMs') {
+    page[key] = Number($(id).value);    if (key === 'intervalMs') {
       page.stop();
       page.start();
     } else {

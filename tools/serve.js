@@ -285,6 +285,48 @@ async function handleContentPost(req, res) {
     JSON.stringify(content));
 }
 
+/**
+ * POST/GET /content/frame - the content page pushes its own canvas, the
+ * wall fetches the latest.
+ *
+ * The /capture route photographs a page at ~60-90 ms per shot: the wall's
+ * frame rate tops out near 10 fps no matter what the app's 30 fps loop
+ * wants. A pushing page removes the photographer entirely: content.html
+ * POSTs its canvas PNG after every draw (~30 fps), the app fetches the
+ * freshest bytes in a few milliseconds. The push is self-throttled by an
+ * in-flight guard, so a slow encode lowers the rate instead of queueing.
+ *
+ * Only the LATEST frame is kept - the wall is a display, not a recorder.
+ */
+const contentFrame = { png: null, type: 'image/jpeg', at: 0 };
+
+async function handleContentFramePost(req, res) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 2 * 1024 * 1024) {
+      req.destroy();
+      respond(res, 413, { 'Content-Type': 'text/plain; charset=utf-8' }, 'frame too large\n');
+      return;
+    }
+    chunks.push(chunk);
+  }
+  contentFrame.png = Buffer.concat(chunks);
+  // Echo back what was pushed; the pusher declares the encoding.
+  contentFrame.type = req.headers['content-type'] ?? 'image/jpeg';
+  contentFrame.at = Date.now();
+  respond(res, 204, {}, '');
+}
+
+function handleContentFrameGet(req, res) {
+  if (contentFrame.png === null) {
+    respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no frame pushed yet\n');
+    return;
+  }
+  respond(res, 200, { 'Content-Type': contentFrame.type, 'Cache-Control': 'no-store' }, contentFrame.png);
+}
+
 const server = createServer(async (req, res) => {
   // GET/HEAD serve files; POST is only the frame upload from the page.
   if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
@@ -304,11 +346,19 @@ const server = createServer(async (req, res) => {
       await handleContentPost(req, res);
       return;
     }
+    if (url.pathname === '/content/frame') {
+      await handleContentFramePost(req, res);
+      return;
+    }
     respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, `404 Not Found: ${req.url}\n`);
     return;
   }
   if (url.pathname === '/capture') {
     await handleCapture(req, res, url);
+    return;
+  }
+  if (url.pathname === '/content/frame') {
+    handleContentFrameGet(req, res);
     return;
   }
   if (url.pathname === '/content') {

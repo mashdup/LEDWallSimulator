@@ -137,6 +137,43 @@ test('POST /content stores legal commands, rejects junk, bumps rev', async () =>
   }
 });
 
+test('POST/GET /content/frame: the pushed canvas round-trips', async () => {
+  const serve = await startServe(await freePort());
+  try {
+    // Nothing pushed: 404, so the app's page source reports a clear failure
+    // instead of decoding garbage.
+    const empty = await fetch(`${serve.base}/content/frame`);
+    assert.equal(empty.status, 404);
+
+    const png = Buffer.from('89504e470d0a1a0a', 'hex'); // a PNG signature, minimal stand-in
+    const post = await fetch(`${serve.base}/content/frame`, {
+      method: 'POST',
+      headers: {'content-type': 'image/png'},
+      body: png,
+    });
+    assert.equal(post.status, 204);
+
+    const got = await fetch(`${serve.base}/content/frame`);
+    assert.equal(got.status, 200);
+    assert.equal(got.headers.get('content-type'), 'image/png');
+    assert.match(got.headers.get('cache-control'), /no-store/);
+    assert.deepEqual(Buffer.from(await got.arrayBuffer()), png);
+
+    // Latest wins: the wall must never fetch a stale frame.
+    const png2 = Buffer.from('00112233', 'hex');
+    await fetch(`${serve.base}/content/frame`, {method: 'POST', headers: {'content-type': 'image/png'}, body: png2});
+    const got2 = Buffer.from(await (await fetch(`${serve.base}/content/frame`)).arrayBuffer());
+    assert.deepEqual(got2, png2);
+
+    // Query strings are ignored: PageSource appends ?url=...&w=... to the
+    // endpoint, and the push route must serve the frame regardless.
+    const q = await fetch(`${serve.base}/content/frame?url=x&w=400&h=400&reload=1`);
+    assert.equal(q.status, 200);
+  } finally {
+    await serve.stop();
+  }
+});
+
 test('two real browser tabs agree on the content after one POST', async () => {
   const chrome = findChrome();
   if (chrome === null) return; // no browser on this machine: nothing to prove
