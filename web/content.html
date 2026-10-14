@@ -1,77 +1,63 @@
 <!doctype html>
+<!--
+  content.html - the wall's content, rendered from server state.
+
+  This page is a pure renderer: it polls GET /content (state + serverTime)
+  and draws. It owns no animation of its own - every phase, position, and
+  pass is derived from the SERVER clock, so every instance of this page
+  (a human's tab, the control page, and the headless capture browser the
+  wall photographs) shows the identical frame at the same moment. That is
+  the only design that survives the pipeline's real topology: the capture
+  browser is a separate instance that loads this page fresh on every
+  shot, shares nothing with any tab, and restarts from zero each time.
+
+  Commands come from POST /content (see web/control.html); the protocol
+  lives in core/content-protocol.js. ?wall=1 hides the human panel so the
+  page is exactly 400x400 - a page taller than the capture viewport gets
+  shot as a scaled full-page image, and panel text bleeds into the wall.
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Content canvas — LED wall companion</title>
+<title>LED wall content</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #000; color: #ccc; font: 14px/1.5 system-ui, sans-serif; }
+  canvas { display: block; width: 400px; height: 400px; image-rendering: pixelated; }
+  #panel { padding: 12px 16px; max-width: 620px; }
+  #status { font-family: ui-monospace, monospace; color: #6f6; }
+  .hint { color: #888; }
+  code { color: #aaa; }
+  @media (max-width: 640px) { canvas { width: 100vw; height: 100vw; } }
+</style>
 <script>
-  // ?wall=1 hides the human furniture, making the page EXACTLY 400x400.
-  // This matters: a page taller than the capture viewport gets shot as a
-  // scaled full-page image, and the panel below the canvas would bleed into
-  // the wall's field of view. Capture /content.html?wall=1 at 400x400 and
-  // one canvas block is exactly one LED, with nothing else in frame.
-  if (new URLSearchParams(location.search).has('wall')) {
-    document.documentElement.classList.add('wall');
+  // ?wall=1: the capture viewport. Hide everything but the canvas so the
+  // page is exactly 400x400 and the shot is 1:1 with the LED grid.
+  if (new URL(location.href).searchParams.get('wall') === '1') {
+    document.documentElement.style.setProperty('--panel-display', 'none');
+    addEventListener('DOMContentLoaded', () => {
+      const p = document.getElementById('panel');
+      if (p) p.style.display = 'none';
+    });
   }
 </script>
-<style>
-  /* The canvas is the wall: 20x20 cells at 20 css px each = 400x400. The app
-     captures a 400x400 viewport at Zoom 20 px/cell, so one canvas pixel block
-     maps to exactly one LED. Everything meant for humans sits BELOW the
-     canvas, outside the captured viewport. */
-  html, body { margin: 0; padding: 0; background: #1a1a1a; color: #ccc;
-    font: 13px/1.5 system-ui, sans-serif; }
-  #wall { display: block; width: 400px; height: 400px; background: #000;
-    image-rendering: pixelated; outline: 1px solid #333; }
-  #panel { padding: 12px 16px; max-width: 640px; }
-  /* Wall mode: the canvas is the whole page. */
-  .wall #panel { display: none; }
-  button { font: inherit; margin-right: 8px; }
-  code { color: #8cf; }
-</style>
 </head>
 <body>
-<!-- The captured surface. Keep it at 0,0, 400x400, black background:
-     black is LED-off, and the capture's area-average is alpha-aware, so
-     transparent also means off. Nothing for the wall may sit outside
-     this canvas. -->
 <canvas id="wall" width="400" height="400"></canvas>
-
-<!-- Human furniture: sits below y=400, so a 400x400 capture never sees it. -->
 <div id="panel">
-  <h3>LED wall content canvas</h3>
-  <p>
-    Point the wall app at this page: source <code>Live web page</code>,
-    URL <code>http://127.0.0.1:8080/content.html?wall=1</code>, capture
-    <code>400 × 400</code>, auto-zoom <strong>off</strong>, zoom
-    <code>20</code>, speed <code>0</code>. The wall then mirrors the canvas
-    one cell per 20 px block, refreshed at the page's poll rate. The
-    <code>?wall=1</code> parameter hides this panel so the page is exactly
-    400 × 400 — without it, a full-page capture drags this text into frame.
+  <h2>LED wall content</h2>
+  <p class="hint">
+    This page renders the server's content state (GET /content) and syncs to
+    the server clock. Open <a href="./control.html">control.html</a> to drive
+    it, or POST protocol messages to <code>/content</code>. Every instance of
+    this page - including the wall's capture browser - shows the same frame.
   </p>
-  <p>
-    Script API on <code>window.WALL</code>: <code>set(x,y,css)</code>,
-    <code>rect(x,y,w,h,css)</code>, <code>clear()</code>,
-    <code>grid</code> (20), <code>cell</code> (20 px),
-    <code>canvas</code>, <code>ctx</code>. Drive it from
-    <code>createClock(33).start()</code> (a worker clock — hidden tabs freeze
-    <code>requestAnimationFrame</code>) and the wall follows.
-  </p>
-  <p>
-    <button id="demo">demo animation</button>
-    <button id="stop">stop</button>
-    <button id="fill">fill white</button>
-    <button id="black">black</button>
-  </p>
-  <p>
-    <output id="status" class="mono">idle</output>
-  </p>
+  <p><output id="status">connecting…</output></p>
 </div>
 
 <script type="module">
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
-import { CONTENT_CHANNEL, parseMessage } from '../core/content-protocol.js';
 import { Panel, Scroller } from '../core/index.js';
 import { Banner } from './banner.js';
 /*
@@ -80,8 +66,6 @@ import { Banner } from './banner.js';
  * The wall is a 20x20 grid; the canvas is 400x400 css px, so one LED is one
  * 20x20 block. Draw pixel-aligned to the block grid and the capture's
  * area-average is exact: no blur, no rounding, what you set is what lights.
- * Fractional/antialiased drawing works but the wall shows the block's average
- * brightness — which is exactly how partial-coverage text gets its greys.
  */
 const WALL = (() => {
   const canvas = document.getElementById('wall');
@@ -89,104 +73,148 @@ const WALL = (() => {
   const grid = 20;
   const cell = canvas.width / grid;
 
-  function clear() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  function cellRect(x, y) {
+    return [x * cell, y * cell, cell, cell];
   }
-
-  function set(x, y, css = '#fff') {
-    ctx.fillStyle = css;
-    ctx.fillRect(x * cell, y * cell, cell, cell);
-  }
-
-  function rect(x, y, w, h, css = '#fff') {
-    ctx.fillStyle = css;
-    ctx.fillRect(x * cell, y * cell, w * cell, h * cell);
-  }
-
-  return { canvas, ctx, grid, cell, clear, set, rect };
-})();
-window.WALL = WALL;
-
-// Exposed for the console and the tests: speak the protocol directly, e.g.
-// WALL.applyCommand({v:1,kind:'text',text:'hi'}) - the same path the
-// BroadcastChannel listener runs, with the parse gate included.
-WALL.applyCommand = (data) => {
-  const m = parseMessage(data);
-  if (m !== null) apply(m);
-  return m;
-};
-
-// ---- remote control: the driver tab speaks the content protocol ------------
-// BroadcastChannel, same origin: the wall app (or any control tab) publishes
-// validated commands; this page executes them. A malformed message is a
-// silent drop - parseMessage is the single authority on what is legal.
-// file:// pages have an opaque origin and the constructor throws: say so.
-
-let channel = null;
-try {
-  channel = new BroadcastChannel(CONTENT_CHANNEL);
-} catch {
-  setOutput('no channel: open from http://127.0.0.1:8080/');
-}
-if (channel !== null) {
-  channel.onmessage = (e) => {
-    const m = parseMessage(e.data);
-    if (m === null) return;
-    apply(m);
-    setOutput(m.kind === 'text' ? `text: ${m.text.slice(0, 24)}` : m.kind);
+  return {
+    grid,
+    cell,
+    canvas,
+    ctx,
+    set(x, y, css) {
+      if (x < 0 || y < 0 || x >= grid || y >= grid) return;
+      ctx.fillStyle = css;
+      ctx.fillRect(...cellRect(x, y));
+    },
+    rect(x, y, w, h, css) {
+      ctx.fillStyle = css;
+      for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+          if (x + i < 0 || y + j < 0 || x + i >= grid || y + j >= grid) continue;
+          ctx.fillRect(...cellRect(x + i, y + j));
+        }
+      }
+    },
+    clear() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    },
   };
+})();
+
+// ---- server-synced state ---------------------------------------------------
+// The single source of truth is the server: state + its clock. Renderers poll,
+// derive every phase from serverTime, and draw. No local animation clocks, no
+// cross-tab channels - the capture browser cannot share anything with a tab,
+// and a page that animates from its own load time is a page the wall can
+// never catch (each capture is a fresh instance at t=0).
+
+let state = { v: 1, kind: 'demo' };
+let rev = -1;
+let serverAt = Date.now();
+let localAt = performance.now();
+
+function serverNow() {
+  // Server time extrapolated by the local monotonic clock between polls:
+  // smooth between polls, corrected at every poll.
+  return serverAt + (performance.now() - localAt);
 }
 
-function apply(m) {
-  switch (m.kind) {
+async function poll() {
+  try {
+    const r = await fetch('/content', { cache: 'no-store' });
+    if (!r.ok) return;
+    const j = await r.json();
+    serverAt = j.at;
+    localAt = performance.now();
+    if (j.rev !== rev) {
+      rev = j.rev;
+      state = j.state;
+      onState();
+    }
+  } catch {
+    // Server down: keep the last state and keep drawing. A wall that holds
+    // its last frame beats a wall that goes dark when a dev server restarts.
+  }
+}
+setInterval(poll, 100);
+poll();
+
+// Text state builds the app's own banner pipeline once per rev: Banner
+// renders the copy to a bitmap (the fallback IS the text - refresh() is
+// never called), Scroller owns the geometry, and the draw loop seeks it to
+// the phase the server clock implies. passMs is one full pass, so the
+// banner's position is a pure function of server time: every instance,
+// including a freshly loaded capture page, lands on the same frame.
+const panel = new Panel();
+let scroller = null;
+let passMs = 0;
+
+function onState() {
+  scroller = null;
+  if (state.kind === 'text') {
+    const src = new Banner({ fallback: state.text, color: state.color ?? '#ffffff' });
+    scroller = new Scroller({
+      panel,
+      source: src.bitmap(),
+      cellsPerFrame: state.step ?? 1,
+      direction: -1,
+    });
+    passMs = scroller.passDurationMs(30);
+  }
+  setOutput(describe());
+}
+
+function describe() {
+  if (state.kind === 'text') return `rev ${rev} · text: ${state.text.slice(0, 32)}`;
+  if (state.kind === 'anim') return `rev ${rev} · ${state.name}`;
+  return `rev ${rev} · ${state.kind}`;
+}
+
+// ---- the renderer: draw(state, serverTime), nothing else --------------------
+
+const clock = createClock(33).start(); // ~30 fps
+clock.onTick = () => draw();
+
+function draw() {
+  const t = serverNow() / 1000;
+  switch (state.kind) {
+    case 'demo':
+    case 'anim':
+      demoDraw(t);
+      break;
     case 'clear':
-      stop();
       WALL.clear();
       break;
     case 'fill':
-      stop();
       WALL.clear();
-      WALL.rect(0, 0, WALL.grid, WALL.grid, m.color);
+      WALL.rect(0, 0, WALL.grid, WALL.grid, state.color);
       break;
     case 'rect':
-      WALL.rect(m.x, m.y, m.w, m.h, m.color);
+      WALL.clear();
+      WALL.rect(state.x, state.y, state.w, state.h, state.color);
       break;
-    case 'anim':
-      if (m.name === 'demo') demo();
-      else { stop(); WALL.clear(); }
+    case 'text': {
+      if (scroller === null) return;
+      // The banner's position is a pure function of server time: seek to the
+      // phase of the current pass, render, paint. No local advance.
+      scroller.seek(((t * 1000) % passMs) / passMs);
+      scroller.render(panel);
+      paintBytes(panel.pixels);
       break;
-    case 'text':
-      banner(m);
-      break;
+    }
   }
 }
 
-// A text command runs the app's own banner pipeline on this canvas: Banner
-// renders the text to a bitmap (the fallback IS the copy - refresh() is never
-// called, so no fetch loop), Scroller advances it across the panel, and the
-// panel's flat RGB bytes paint straight onto the canvas. One banner
-// implementation, two hosts - fonts, cap-height fitting, and greys all match
-// the app's text mode exactly.
-let bannerClock = null;
-
-function banner(m) {
-  stop();
-  if (bannerClock !== null) bannerClock.terminate();
-  const panel = new Panel();
-  const src = new Banner({fallback: m.text, color: m.color ?? '#ffffff'});
-  const scroller = new Scroller({
-    panel,
-    source: src.bitmap(),
-    cellsPerFrame: m.step ?? 1,
-    direction: -1,
-    loop: m.loop ?? true,
-  });
-  const fps = m.fps ?? 12;
-  bannerClock = createClock(1000 / fps).start();
-  bannerClock.onTick = () => {
-    scroller.tick();
-    paintBytes(panel.pixels);
-  };
+function demoDraw(t) {
+  // Phases from the epoch, not from page-load time: every instance of this
+  // page shows the same square at the same second, and a capture page that
+  // loaded 40 ms ago is in phase with every tab, not at t=0.
+  WALL.clear();
+  const bx = (Math.sin(t * 1.3) * 0.5 + 0.5) * (WALL.grid - 1);
+  const by = (Math.sin(t * 0.9) * 0.5 + 0.5) * (WALL.grid - 1);
+  WALL.rect(Math.round(bx), Math.round(by), 2, 2, '#ff8800');
+  const secs = Math.floor(t) % WALL.grid;
+  for (let x = 0; x <= secs; x++) WALL.set(x, WALL.grid - 1, '#00ff66');
 }
 
 // The panel's flat RGB bytes -> the canvas, one fillRect per lit cell.
@@ -204,48 +232,26 @@ function paintBytes(bytes) {
   }
 }
 
-// ---- demo: proves the loop end-to-end (canvas -> capture -> wall) ----------
-// The tempo lives in a worker, not requestAnimationFrame: a hidden tab's rAF
-// stops entirely, which would freeze the wall's view of this page the moment
-// the tab loses focus. Worker ticks keep the animation running at full rate.
-
-let clock = null;
-
-function stop() {
-  if (clock !== null) clock.terminate();
-  clock = null;
-  if (bannerClock !== null) { bannerClock.terminate(); bannerClock = null; }
-}
-
-function demo() {
-  stop();
-  const t0 = performance.now();
-  clock = createClock(33).start(); // ~30 fps
-  clock.onTick = () => {
-    const s = (performance.now() - t0) / 1000;
-    WALL.clear();
-
-    // A bouncing block, fractional position: the wall glides, not jumps.
-    const bx = (Math.sin(s * 1.3) * 0.5 + 0.5) * (WALL.grid - 1);
-    const by = (Math.sin(s * 0.9) * 0.5 + 0.5) * (WALL.grid - 1);
-    WALL.rect(Math.round(bx), Math.round(by), 2, 2, '#ff8800');
-
-    // A seconds bar along the bottom row: slow, readable, unmistakably live.
-    const secs = Math.floor(s) % WALL.grid;
-    for (let x = 0; x <= secs; x++) WALL.set(x, WALL.grid - 1, '#00ff66');
-  };
-}
-
-document.getElementById('demo').addEventListener('click', () => { startKeepAlive(); demo(); });
-document.getElementById('stop').addEventListener('click', () => { stop(); WALL.clear(); });
-document.getElementById('fill').addEventListener('click', () => { stop(); WALL.rect(0, 0, WALL.grid, WALL.grid, '#fff'); });
-document.getElementById('black').addEventListener('click', () => { stop(); WALL.clear(); });
+// Chrome throttles hidden tabs (and their workers) to ~1 Hz; the audio
+// exemption is the in-page escape, and any click grants it.
+addEventListener('pointerdown', () => startKeepAlive(), { once: true });
 
 function setOutput(text) {
   document.getElementById('status').textContent = text;
 }
 
-demo();
+// Exposed for the console: WALL.applyMessage({v:1,kind:'fill',color:'red'})
+// publishes straight to the server - the same path the control page uses.
+WALL.applyMessage = async (m) => {
+  const r = await fetch('/content', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(m),
+  });
+  return r.status;
+};
+window.WALL = WALL;
+
 setOutput('demo'); // proof of a live module: the dump-dom test asserts on this
 </script>
 </body>

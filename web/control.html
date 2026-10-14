@@ -1,0 +1,108 @@
+<!doctype html>
+<!--
+  control.html - drive the wall's content from any tab.
+
+  Posts protocol commands to the server (POST /content); every content page
+  instance - a human's tab, other control tabs, and the headless capture
+  browser the wall photographs - renders the new state within one poll.
+  The server is the source of truth, so "synced across tabs" is not a
+  tab-to-tab promise: it is a shared-state promise, which is the only kind
+  that reaches the capture browser too.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LED wall control</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 24px; background: #0a0a0a; color: #ccc; font: 14px/1.5 system-ui, sans-serif; }
+  h1 { font-size: 18px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+  button { font: inherit; padding: 8px 14px; background: #222; color: #ccc; border: 1px solid #444; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #333; }
+  input[type=text] { font: inherit; padding: 8px; background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; }
+  #status { font-family: ui-monospace, monospace; color: #6f6; white-space: pre; }
+  .hint { color: #888; max-width: 560px; }
+  code { color: #aaa; }
+</style>
+</head>
+<body>
+<h1>LED wall control</h1>
+<p class="hint">
+  Commands go to the server; every content page (and the wall's capture
+  browser) follows. Open <a href="./content.html">content.html</a> to watch,
+  and point the wall app's page mode at
+  <code>http://127.0.0.1:8080/content.html?wall=1</code>.
+</p>
+
+<label>Text <input id="text" type="text" size="40" placeholder="scroll this on the wall" spellcheck="false"></label>
+<label>Color <input id="color" type="text" size="9" value="#ffffff"></label>
+
+<div class="row">
+  <button id="send" type="button">Send text</button>
+  <button id="fill" type="button">Fill</button>
+  <button id="demo" type="button">Demo</button>
+  <button id="clear" type="button">Clear</button>
+</div>
+
+<p><output id="status">connecting…</output></p>
+
+<script type="module">
+import { makeMessage } from '../core/content-protocol.js';
+
+const $ = (id) => document.getElementById(id);
+
+async function send(m, label) {
+  try {
+    const r = await fetch('/content', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(m),
+    });
+    set(r.ok ? `sent: ${label} (HTTP ${r.status})` : `sent FAILED: HTTP ${r.status}`, r.ok);
+  } catch (err) {
+    set(`send failed: ${err.message}`, false);
+  }
+}
+
+$('send').addEventListener('click', () => {
+  const text = $('text').value.trim();
+  if (text === '') return;
+  send(makeMessage('text', { text, color: $('color').value }), `text ${text.slice(0, 24)}`);
+});
+$('fill').addEventListener('click', () => send(makeMessage('fill', { color: $('color').value }), 'fill'));
+$('demo').addEventListener('click', () => send(makeMessage('anim', { name: 'demo' }), 'demo'));
+$('clear').addEventListener('click', () => send(makeMessage('clear'), 'clear'));
+
+// Enter in the text box sends, like a ticker.
+$('text').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('send').click();
+});
+
+// The status line mirrors the server's current state, so the control page
+// shows what the wall shows - the ack is the state, not the POST.
+async function watch() {
+  try {
+    const r = await fetch('/content', { cache: 'no-store' });
+    if (!r.ok) return;
+    const j = await r.json();
+    const s = j.state;
+    const what = s.kind === 'text' ? `text: ${s.text.slice(0, 32)}`
+      : s.kind === 'anim' ? s.name
+      : s.kind;
+    set(`server rev ${j.rev} · ${what}`);
+  } catch {
+    set('server unreachable', false);
+  }
+}
+setInterval(watch, 250);
+watch();
+
+function set(text, ok = true) {
+  const out = $('status');
+  out.textContent = text;
+  out.style.color = ok ? '#6f6' : '#f66';
+}
+</script>
+</body>
+</html>

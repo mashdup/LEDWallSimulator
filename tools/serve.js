@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
 import { Capture, parseCaptureParams } from './capture.js';
+import { parseMessage } from '../core/content-protocol.js';
 import { isFetchablePort } from './ports.js';
 import { FRAME_BYTES } from '../core/frame.js';
 import { DdpTransport } from './bridge.js';
@@ -226,6 +227,59 @@ async function handleFrame(req, res) {
   }
 }
 
+/**
+ * GET/POST /content - the content state, server-side.
+ *
+ * The wall's pipeline spans THREE disconnected browser worlds: the control
+ * tab, a human's content tab, and the headless capture browser that renders
+ * the page the wall photographs. They share no tabs, no BroadcastChannel, no
+ * storage - only this server. So the content state lives HERE: pages POST
+ * commands, every page GETs (state, serverTime) and renders it. Deriving
+ * animation phase from the server clock makes all instances show the same
+ * frame at the same moment - the wall, the control tab, and a human's tab
+ * are one synced view, not three animations.
+ *
+ * Last write wins; a monotonically increasing rev lets renderers detect
+ * changes without diffing. Bodies are protocol messages: parseMessage is the
+ * gate, so the server stores only legal commands.
+ */
+const content = { rev: 0, at: Date.now(), state: { v: 1, kind: 'demo' } };
+
+function handleContentGet(req, res) {
+  // no-store: renderers poll this every ~100 ms; a cached answer is a frozen wall.
+  respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+    JSON.stringify(content));
+}
+
+async function handleContentPost(req, res) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 4096) {
+      req.destroy();
+      respond(res, 413, { 'Content-Type': 'text/plain; charset=utf-8' }, 'content command too large\n');
+      return;
+    }
+    chunks.push(chunk);
+  }
+  let m;
+  try {
+    m = parseMessage(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+  } catch {
+    m = null;
+  }
+  if (m === null) {
+    respond(res, 400, { 'Content-Type': 'text/plain; charset=utf-8' }, 'not a legal content command\n');
+    return;
+  }
+  content.rev += 1;
+  content.at = Date.now();
+  content.state = m;
+  respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+    JSON.stringify(content));
+}
+
 const server = createServer(async (req, res) => {
   // GET/HEAD serve files; POST is only the frame upload from the page.
   if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
@@ -241,11 +295,19 @@ const server = createServer(async (req, res) => {
       await handleFrame(req, res);
       return;
     }
+    if (url.pathname === '/content') {
+      await handleContentPost(req, res);
+      return;
+    }
     respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, `404 Not Found: ${req.url}\n`);
     return;
   }
   if (url.pathname === '/capture') {
     await handleCapture(req, res, url);
+    return;
+  }
+  if (url.pathname === '/content') {
+    handleContentGet(req, res);
     return;
   }
 
