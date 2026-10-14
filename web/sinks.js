@@ -429,10 +429,19 @@ const ADALIGHT_HEADER = 6;
 export class AdalightSink extends SerialPortSink {
   constructor(opts) {
     super('adalight', opts);
+    /** The brightness the page declared via meta. WLED has no meta record, so
+     *  this sink folds it into the frame bytes — the one place WLED will see
+     *  it. Scales like the firmware: (v * b) >> 8, 255 = no scaling. */
+    this.brightness = 255;
   }
 
   encode(bytes, kind) {
-    if (kind !== 'frame') return null;
+    if (kind !== 'frame') {
+      // Meta layout: 0xA4 | brightness | limitLo | limitHi | 0x5A. Nothing
+      // goes on the wire for it, but the brightness must be remembered.
+      if (kind === 'meta') this.brightness = bytes[1];
+      return null;
+    }
 
     /*
      * The header carries the LED count MINUS ONE — that is Adalight's convention,
@@ -457,6 +466,10 @@ export class AdalightSink extends SerialPortSink {
     out[4] = lo;
     out[5] = hi ^ lo ^ 0x55;
     out.set(bytes.subarray(OFFSET_RGB, OFFSET_RGB + RGB_BYTES), ADALIGHT_HEADER);
+    if (this.brightness < 255) {
+      const b = this.brightness;
+      for (let i = ADALIGHT_HEADER; i < out.length; i++) out[i] = (out[i] * b) >> 8;
+    }
     return out;
   }
 }

@@ -49,6 +49,10 @@ const panel = new Panel();
 
 /** Scratch buffers allocated once: 30 fps x 1200 bytes is not something to GC. */
 const packed = new Uint8Array(RGB_BYTES);
+// The scaled copy: what the wall will actually draw after it folds in the
+// meta brightness, and therefore what the sim, the estimator and the peak
+// meter must look at. The wire carries `packed` raw.
+const rendered = new Uint8Array(RGB_BYTES);
 const wire = new Uint8Array(FRAME_BYTES);
 
 let layout = new Layout();
@@ -87,6 +91,8 @@ let seq = 0;
  * image that is not changing leaves the wall showing whatever it had.
  */
 let lastSent = null;
+/** The brightness the wall was last told via meta; meta is re-sent on change. */
+let lastMetaBr = -1;
 /** When the last frame went out, so the stale watchdog can be fed. */
 let lastSentMs = 0;
 let wallView = false;
@@ -314,10 +320,26 @@ function tick() {
 
   const k = budget.brightnessFor(panel, Number($('brightness').value));
   packInto(panel, layout, packed);
-  if (k < 1) for (let i = 0; i < packed.length; i++) packed[i] = (packed[i] * k) | 0;
+  // Brightness is applied ONCE, at the sink: the sketch folds the meta
+  // brightness into renderWall(), and the DDP transport applies it to the
+  // frames that follow. Scaling the wire bytes here as well made the wall
+  // display k-squared — half the clamp, squared, and a visibly dim wall.
+  // `rendered` is the scaled copy the estimator, the peak meter and the sim
+  // see, which is what the wall will actually draw once the sink scales it.
+  rendered.set(packed);
+  if (k < 1) for (let i = 0; i < rendered.length; i++) rendered[i] = (rendered[i] * k) | 0;
 
-  const ma = budget.observe(packed);
-  peak.push(packed);
+  const ma = budget.observe(rendered);
+  peak.push(rendered);
+
+  // The clamp moves between scene changes (its peak-hold is monotonic), so
+  // a meta re-send on change is rare — 5 bytes, and the wall's applied
+  // brightness stops being whatever the first frame asked for.
+  const br = Math.round(k * 255);
+  if (br !== lastMetaBr) {
+    lastMetaBr = br;
+    sink?.send(meta({ brightness: br, limitMa: Math.round(budget.limitMa) }));
+  }
 
   // A frame goes out when the bytes changed, or when the wall's stale-frame
   // watchdog is due a feed. The device fades to black after WALL_TIMING.staleMs of
@@ -361,11 +383,11 @@ function draw() {
   // Nothing displays a hidden tab, so the canvas work is pure waste there — but
   // the bytes above it still went out, which is the whole point of the split.
   if (document.hidden) return;
-  // Both views draw the SAME clamped bytes; only the display layout differs.
-  // Drawing the packed array at the sender's own layout reproduces the design
+  // Both views draw the SAME scaled bytes; only the display layout differs.
+  // Drawing the rendered array at the sender's own layout reproduces the design
   // as authored (byte layout.index(x,y) lands on cell (x,y)), so the sim shows
   // exactly the brightness the wall receives instead of the unclamped panel.
-  sim.drawWall(packed, wallView ? wallLayout : layout);
+  sim.drawWall(rendered, wallView ? wallLayout : layout);
   sim.setOverlay($('overlay').checked);
 }
 
@@ -410,9 +432,11 @@ async function connect() {
       channel: CHANNEL,
       onFrame: kind === 'broadcast' ? onIncoming : null,
     });
-    // Tell the wall our brightness and current limit before the first frame,
+    // Tell the wall our brightness and power budget before the first frame,
     // so it never runs an unbudgeted frame while the host is still measuring.
-    sink.send(meta(budget.toMeta()));
+    const m = budget.toMeta();
+    lastMetaBr = m.brightness;
+    sink.send(meta(m));
     // A fresh sink has been given nothing, so the next tick must push even if the
     // image is not changing; otherwise connecting to a still wall shows nothing.
     lastSent = null;
@@ -566,7 +590,9 @@ $('pageEnd').addEventListener('click', () => {
 $('limitMa').addEventListener('change', () => {
   budget.limitMa = Number($('limitMa').value);
   budget.reset();
-  sink?.send(meta(budget.toMeta()));
+  const m = budget.toMeta();
+  lastMetaBr = m.brightness;
+  sink?.send(meta(m));
 });
 $('headroom').addEventListener('change', () => {
   budget.headroom = Number($('headroom').value);

@@ -661,6 +661,40 @@ test('the adalight sink accepts a meta record and sends nothing for it', async (
   }
 });
 
+test('the adalight sink folds a meta brightness into the frame bytes that follow', async () => {
+  // WLED has no meta record, so for this sink the brightness MUST ride in the
+  // payload: (v * b) >> 8, the firmware's own arithmetic. If it does not, the
+  // page's power clamp never reaches the wall — the k-squared bug in reverse.
+  const port = fakePort();
+  const sink = await connectedSink(port, {}, 'adalight');
+  try {
+    sink.send(meta({ brightness: 128, limitMa: 8000 }));
+    await settle();
+    const rec = sampleFrame();
+    sink.send(rec);
+    await settle();
+
+    const out = port.written[0];
+    const rgb = rec.subarray(OFFSET_RGB, OFFSET_RGB + RGB_BYTES);
+    for (let i = 0; i < rgb.length; i++) {
+      assert.equal(out[6 + i], (rgb[i] * 128) >> 8, `byte ${i}: (v * 128) >> 8`);
+    }
+
+    // A later meta of 255 removes the scaling again.
+    sink.send(meta({ brightness: 255, limitMa: 8000 }));
+    await settle();
+    sink.send(rec);
+    await settle();
+    assert.deepEqual(
+      [...port.written[1].subarray(6)],
+      [...rgb],
+      'brightness 255 is the identity: the payload is unmoved',
+    );
+  } finally {
+    await sink.close();
+  }
+});
+
 test('the wire rate is derived from the frame size, not hand-typed', () => {
   assert.equal(DEFAULT_BAUD, 921600);
   assert.ok(Math.abs(WIRE_MS_PER_FRAME - (FRAME_BYTES * 10 * 1000) / DEFAULT_BAUD) < 1e-9);
