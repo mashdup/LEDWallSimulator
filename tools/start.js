@@ -44,7 +44,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { findChrome } from './capture.js';
@@ -73,6 +73,7 @@ function parseArgs(argv) {
   let flag = null;
   let browser = true;
   let app = false;
+  let electron = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -90,6 +91,8 @@ function parseArgs(argv) {
       browser = false;
     } else if (arg === '--app') {
       app = true;
+    } else if (arg === '--electron') {
+      electron = true;
     } else if (arg === '--help' || arg === '-h') {
       usage();
       process.exit(0);
@@ -102,7 +105,7 @@ function parseArgs(argv) {
 
   const explicit = flag !== null || process.env.PORT !== undefined;
   const raw = flag ?? process.env.PORT ?? null;
-  if (raw === null) return { port: null, explicit: false, browser, app };
+  if (raw === null) return { port: null, explicit: false, browser, app, electron };
 
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -117,7 +120,38 @@ function parseArgs(argv) {
     console.error('Pick any other port, e.g. 8080');
     process.exit(2);
   }
-  return { port, explicit, browser, app };
+  return { port, explicit, browser, app, electron };
+}
+
+/**
+ * The show app: Electron. Same Chromium engine as --app mode, but the tab
+ * lifecycle is gone entirely - no throttling tiers, no occlusion, no
+ * delegation, no session restore, and backgroundThrottling:false is OUR
+ * decision in main.cjs. Web Serial is granted and answered programmatically
+ * there (COM8 preferred), so the show needs no click ritual for the picker.
+ */
+function openElectronWindow(url) {
+  // The electron package exports the binary path from CJS; ask a CJS child.
+  const probe = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("electron"))'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  const bin = (probe.stdout ?? '').trim();
+  if (probe.status !== 0 || !bin) {
+    console.log('start: electron is not installed (npm i -D electron). Falling back to the default browser.');
+    openInBrowser(url);
+    return null;
+  }
+  const main = fileURLToPath(new URL('./electron/main.cjs', import.meta.url));
+  const proc = spawn(bin, [main, url], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });
+  proc.unref();
+  proc.stdout?.on('data', (d) => process.stdout.write(`electron: ${d}`.replace(/electron: electron: /g, 'electron: ')));
+  proc.stderr?.on('data', (d) => process.stderr.write(`electron: ${d}`.replace(/electron: electron: /g, 'electron: ')));
+  proc.once('exit', (code) => console.log(`electron: window process exited (code ${code})`));
+  proc.once('error', (e) => {
+    console.log(`start: could not launch electron (${e.code}). Open the URL in any Chrome as a fallback.`);
+  });
+  return proc;
 }
 
 /**
@@ -169,10 +203,17 @@ function killStaleInstances() {
  */
 function resetProfile() {
   const profileDir = fileURLToPath(new URL('../.wall-profile', import.meta.url));
-  try {
-    rmSync(profileDir, {recursive: true, force: true, maxRetries: 10, retryDelay: 300});
-  } catch {
-    // A dying instance may still hold a file; Chrome tolerates leftovers.
+  // Retry until the directory is actually gone: a dying Chrome's children
+  // keep files locked for a moment, and a PARTIAL wipe leaves the session
+  // behind - which is the tab window again (measured: partial wipe -> 95 px).
+  for (let i = 0; i < 15; i++) {
+    try {
+      rmSync(profileDir, {recursive: true, force: true, maxRetries: 4, retryDelay: 200});
+    } catch {
+      // Fall through to the existence check; it is the arbiter.
+    }
+    if (!existsSync(profileDir)) return;
+    sleepMs(400);
   }
 }
 
@@ -218,6 +259,17 @@ function openAppWindow(url) {
     '--autoplay-policy=no-user-gesture-required',
     '--no-first-run',
     '--no-default-browser-check',
+    // Noise control for the Playwright Chromium build (measured startup
+    // chatter; none of it affects the wall):
+    //   GCM 'PHONE_REGISTRATION_ERROR' spam (no Google API key here, and
+    //   the wall needs no background Google traffic). NOTE: --no-sandbox
+    //   also silences the sandbox notice, but it was MEASURED to break
+    //   app mode (95 px tab window instead of a 39 px app window) - the
+    //   sandbox notice itself is a known-harmless Playwright build
+    //   message, filtered in the relay below.
+    '--disable-background-networking',
+    '--disable-sync',
+    '--disable-component-update',
     '--window-size=1280,800',
     // Random loopback DevTools port, announced in <profile>/DevToolsActivePort.
     // Cheap to keep: it makes the show window inspectable (window type,
@@ -228,8 +280,16 @@ function openAppWindow(url) {
   proc.unref();
   // Chrome's own words when the show window misbehaves (a dying browser
   // process is otherwise silent: stdio 'ignore' hides the exit reason).
-  proc.stdout?.on('data', (d) => process.stdout.write(`app: ${d}`));
-  proc.stderr?.on('data', (d) => process.stderr.write(`app: ${d}`));
+  // Known-harmless chatter is dropped: GCM registration spam (no Google
+  // API key in the Playwright build) and the DevTools banner.
+  const NOISE = /gcm|GCM|PHONE_REGISTRATION|DevTools listening|wrong_secret|log in to GCM|Sandbox cannot access/;
+  const relay = (to) => (d) => {
+    for (const line of String(d).split(/\r?\n/)) {
+      if (line.trim() !== '' && !NOISE.test(line)) to.write(`app: ${line}\n`);
+    }
+  };
+  proc.stdout?.on('data', relay(process.stdout));
+  proc.stderr?.on('data', relay(process.stderr));
   proc.once('exit', (code) => console.log(`app: window process exited (code ${code})`));
   proc.once('error', () => {
     console.log(`start: could not launch ${chrome}. Open ${url} in any Chrome,`);
@@ -264,7 +324,7 @@ function openInBrowser(url) {
  * Run serve.js on one port, forwarding its output, and open the browser the
  * moment it reports a bound socket. Resolves with the exit outcome.
  */
-function serveOnce(port, openBrowser, appMode) {
+function serveOnce(port, openBrowser, appMode, electronMode) {
   return new Promise((done) => {
     const proc = spawn(process.execPath, [SERVE_SCRIPT, '--port', String(port)], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -281,7 +341,8 @@ function serveOnce(port, openBrowser, appMode) {
       const ready = READY.exec(log);
       if (ready === null) return;
       announced = true;
-      if (appMode) appChild = openAppWindow(ready[1]);
+      if (electronMode) appChild = openElectronWindow(ready[1]);
+      else if (appMode) appChild = openAppWindow(ready[1]);
       else if (openBrowser) openInBrowser(ready[1]);
       console.log(`start: ${ready[1]} — Ctrl+C to stop.`);
     };
@@ -311,6 +372,15 @@ function shutdown() {
   // isolated instance carries it) and leaves the user's own Chrome alone.
   if (appChild !== null) {
     killStaleInstances();
+    if (process.platform === 'win32') {
+      spawnSync('powershell.exe', ['-NoProfile', '-Command',
+        "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | " +
+        "Where-Object CommandLine -like '*electron*main.cjs*' | " +
+        'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'],
+        { stdio: 'ignore', windowsHide: true });
+    } else {
+      spawnSync('pkill', ['-f', 'electron.*main.cjs'], { stdio: 'ignore' });
+    }
   }
   const proc = child;
   if (proc === null) {
@@ -333,11 +403,11 @@ for (const signal of process.platform === 'win32' ? ['SIGINT', 'SIGBREAK', 'SIGT
   process.once(signal, shutdown);
 }
 
-const { port, explicit, browser, app } = parseArgs(process.argv.slice(2));
+const { port, explicit, browser, app, electron } = parseArgs(process.argv.slice(2));
 
 let attempt = port ?? DEFAULT_PORT;
 for (let tries = 0; ; tries++) {
-  const outcome = await serveOnce(attempt, browser, app);
+  const outcome = await serveOnce(attempt, browser, app, electron);
   if (outcome.code === 0 || shuttingDown) break;
   // An explicit port is a request, not a preference. Only an unrequested 8080
   // may move, and only once.
