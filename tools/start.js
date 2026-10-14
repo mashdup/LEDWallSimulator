@@ -3,7 +3,28 @@
  *
  * `npm start` boots tools/serve.js, waits until the server has actually bound,
  * opens the loopback URL in the default browser, and takes the whole process
- * tree down on Ctrl+C.
+ * tree down on Ctrl+C. `npm run wall` (= `--app`) is the show-mode: the wall
+ * opens as a standalone Chrome APP WINDOW instead of a browser tab.
+ *
+ * Why app mode is not a cosmetic choice - it is the throttling fix:
+ *
+ *   Chrome detects when a window is fully covered or minimized (occlusion)
+ *   and treats it as a hidden tab: ~1 Hz timers, and after ~5 minutes,
+ *   intensive throttling to one wake-up per minute. That is the cliff: the
+ *   wall runs, then drops to 1 Hz. In-page exemptions (audible audio,
+ *   looping media) fight this with diminishing returns.
+ *
+ *   The app window removes the cause instead:
+ *     --disable-features=CalculateNativeWinOcclusion  a covered window is
+ *        never classified as hidden, so the throttling never starts at all
+ *     --app=<url>          no tab strip; the window is an app, not a tab
+ *     --user-data-dir=...  a dedicated profile: no extensions, no sign-in,
+ *        no Memory Saver interference - nothing that can inject jank
+ *     --autoplay-policy=no-user-gesture-required  the keep-alive arms itself
+ *        on load; no click ritual needed
+ *
+ * The in-page keep-alive stays as a second line of defense (it is harmless
+ * and covers the case where the app is opened in a normal browser tab).
  *
  * Why this is a script rather than a two-line `start "" <url> && node
  * tools/serve.js`:
@@ -25,6 +46,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { findChrome } from './capture.js';
 import { freePort, isFetchablePort } from './ports.js';
 
 const SERVE_SCRIPT = fileURLToPath(new URL('./serve.js', import.meta.url));
@@ -35,17 +57,21 @@ const READY = /LED wall dev server: (http:\/\/127\.0\.0\.1:\d+)/;
 
 /** The serve.js child this process is responsible for tearing down. */
 let child = null;
+/** The app-mode Chromium, when --app launched one. */
+let appChild = null;
 let shuttingDown = false;
 
 function usage() {
   console.error('usage: npm start [-- --port <port>] [--no-browser]');
-  console.error('       node tools/start.js [--port 8090] [--no-browser]');
+  console.error('       npm run wall  (standalone app window, show mode)');
+  console.error('       node tools/start.js [--port 8090] [--no-browser] [--app]');
 }
 
 /** Same flag/env precedence as serve.js: --port > PORT > 8080. */
 function parseArgs(argv) {
   let flag = null;
   let browser = true;
+  let app = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -61,6 +87,8 @@ function parseArgs(argv) {
       flag = arg.slice('--port='.length);
     } else if (arg === '--no-browser') {
       browser = false;
+    } else if (arg === '--app') {
+      app = true;
     } else if (arg === '--help' || arg === '-h') {
       usage();
       process.exit(0);
@@ -88,7 +116,42 @@ function parseArgs(argv) {
     console.error('Pick any other port, e.g. 8080');
     process.exit(2);
   }
-  return { port, explicit, browser };
+  return { port, explicit, browser, app };
+}
+
+/**
+ * The show-mode window: a standalone Chrome app window, not a tab.
+ *
+ * The flags are the throttling fix, not cosmetics - see the header. The
+ * dedicated profile lives in the repo (.wall-profile) so the app instance is
+ * fully isolated from the user's browsing: no extensions, no sign-in, no
+ * Memory Saver, and nothing to clean up beyond deleting the directory.
+ */
+function openAppWindow(url) {
+  let chrome;
+  try {
+    chrome = findChrome();
+  } catch (err) {
+    console.log(`start: no Chromium found (${err.message}). Open ${url} yourself.`);
+    return null;
+  }
+  const profile = fileURLToPath(new URL('../.wall-profile', import.meta.url));
+  const args = [
+    `--app=${url}`,
+    `--user-data-dir=${profile}`,
+    '--disable-features=CalculateNativeWinOcclusion',
+    '--autoplay-policy=no-user-gesture-required',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--window-size=1280,800',
+  ];
+  const proc = spawn(chrome, args, { stdio: 'ignore', windowsHide: true, detached: true });
+  proc.unref();
+  proc.once('error', () => {
+    console.log(`start: could not launch ${chrome}. Open ${url} in any Chrome,`);
+    console.log('       or set LED_CHROME to the browser executable.');
+  });
+  return proc;
 }
 
 /**
@@ -117,7 +180,7 @@ function openInBrowser(url) {
  * Run serve.js on one port, forwarding its output, and open the browser the
  * moment it reports a bound socket. Resolves with the exit outcome.
  */
-function serveOnce(port, openBrowser) {
+function serveOnce(port, openBrowser, appMode) {
   return new Promise((done) => {
     const proc = spawn(process.execPath, [SERVE_SCRIPT, '--port', String(port)], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -134,7 +197,8 @@ function serveOnce(port, openBrowser) {
       const ready = READY.exec(log);
       if (ready === null) return;
       announced = true;
-      if (openBrowser) openInBrowser(ready[1]);
+      if (appMode) appChild = openAppWindow(ready[1]);
+      else if (openBrowser) openInBrowser(ready[1]);
       console.log(`start: ${ready[1]} — Ctrl+C to stop.`);
     };
     proc.stdout.on('data', (chunk) => pump(chunk, process.stdout));
@@ -156,6 +220,22 @@ function serveOnce(port, openBrowser) {
 function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  // The app window belongs to this session: take it down too, for the same
+  // reason serve.js's headless Chromium must not be orphaned. Chrome
+  // reparents its children, so a tree-kill of the launched PID misses them;
+  // match on the dedicated profile directory instead - precise (only our
+  // isolated instance carries it) and leaves the user's own Chrome alone.
+  if (appChild !== null) {
+    if (process.platform === 'win32') {
+      spawnSync('powershell.exe', ['-NoProfile', '-Command',
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
+        "Where-Object CommandLine -like '*wall-profile*' | " +
+        'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'],
+        { stdio: 'ignore', windowsHide: true });
+    } else {
+      spawnSync('pkill', ['-f', 'wall-profile'], { stdio: 'ignore' });
+    }
+  }
   const proc = child;
   if (proc === null) {
     process.exit(0);
@@ -177,11 +257,11 @@ for (const signal of process.platform === 'win32' ? ['SIGINT', 'SIGBREAK', 'SIGT
   process.once(signal, shutdown);
 }
 
-const { port, explicit, browser } = parseArgs(process.argv.slice(2));
+const { port, explicit, browser, app } = parseArgs(process.argv.slice(2));
 
 let attempt = port ?? DEFAULT_PORT;
 for (let tries = 0; ; tries++) {
-  const outcome = await serveOnce(attempt, browser);
+  const outcome = await serveOnce(attempt, browser, app);
   if (outcome.code === 0 || shuttingDown) break;
   // An explicit port is a request, not a preference. Only an unrequested 8080
   // may move, and only once.
