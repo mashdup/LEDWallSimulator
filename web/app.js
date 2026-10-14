@@ -270,6 +270,7 @@ function setSourceMode(mode) {
   $('pageControls').hidden = !isPage;
 
   if (sourceMode === 'content') applyContentPresets();
+  if (sourceMode === 'page' && page.endpoint === '/content/frame') restoreCaptureDefaults();
 
   if (isPage) {
     banner.stop();
@@ -306,6 +307,20 @@ function applyContentPresets() {
   $('pageZoom').disabled = true;
   $('pageSpeed').value = 0;
   if (renderer instanceof Panner) renderer.cellsPerFrame = 0;
+}
+
+/**
+ * The mirror of applyContentPresets: leaving the content feed for plain
+ * page mode must restore the capture settings, or the push endpoint
+ * silently answers every page-mode poll (it ignores the url parameter),
+ * and the page capture looks completely dead. Presets that go in
+ * pairs go out in pairs.
+ */
+function restoreCaptureDefaults() {
+  $('pageEndpoint').value = '/capture';
+  page.endpoint = '/capture';
+  $('pagePoll').value = 150;
+  page.intervalMs = 150;
 }
 
 // ---------------------------------------------------------------------------
