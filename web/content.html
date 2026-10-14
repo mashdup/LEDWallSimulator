@@ -73,6 +73,7 @@ import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
 import { CONTENT_CHANNEL, parseMessage } from '../core/content-protocol.js';
 import { Panel, Scroller } from '../core/index.js';
+import { Banner } from './banner.js';
 /*
  * WALL — the drawing API for this page's canvas, sized to the panel.
  *
@@ -105,6 +106,15 @@ const WALL = (() => {
   return { canvas, ctx, grid, cell, clear, set, rect };
 })();
 window.WALL = WALL;
+
+// Exposed for the console and the tests: speak the protocol directly, e.g.
+// WALL.applyCommand({v:1,kind:'text',text:'hi'}) - the same path the
+// BroadcastChannel listener runs, with the parse gate included.
+WALL.applyCommand = (data) => {
+  const m = parseMessage(data);
+  if (m !== null) apply(m);
+  return m;
+};
 
 // ---- remote control: the driver tab speaks the content protocol ------------
 // BroadcastChannel, same origin: the wall app (or any control tab) publishes
@@ -151,28 +161,36 @@ function apply(m) {
   }
 }
 
-// A text command scrolls through the same core Scroller the wall app's text
-// mode uses, drawn onto this canvas - one banner implementation, two hosts.
+// A text command runs the app's own banner pipeline on this canvas: Banner
+// renders the text to a bitmap (the fallback IS the copy - refresh() is never
+// called, so no fetch loop), Scroller advances it across the panel, and the
+// panel's flat RGB bytes paint straight onto the canvas. One banner
+// implementation, two hosts - fonts, cap-height fitting, and greys all match
+// the app's text mode exactly.
 let bannerClock = null;
 
 function banner(m) {
   stop();
   if (bannerClock !== null) bannerClock.terminate();
-  const scroller = new Scroller(m.text, {
-    panel: new Panel(),
-    fps: m.fps ?? 12,
-    step: m.step ?? 1,
+  const panel = new Panel();
+  const src = new Banner({fallback: m.text, color: m.color ?? '#ffffff'});
+  const scroller = new Scroller({
+    panel,
+    source: src.bitmap(),
+    cellsPerFrame: m.step ?? 1,
+    direction: -1,
     loop: m.loop ?? true,
   });
-  const color = m.color ?? '#ffffff';
-  bannerClock = createClock(1000 / scroller.fps).start();
+  const fps = m.fps ?? 12;
+  bannerClock = createClock(1000 / fps).start();
   bannerClock.onTick = () => {
-    paintBytes(scroller.frame(), color);
+    scroller.tick();
+    paintBytes(panel.pixels);
   };
 }
 
-// 1200 RGB bytes -> the canvas, one fillRect per lit cell.
-function paintBytes(bytes, color) {
+// The panel's flat RGB bytes -> the canvas, one fillRect per lit cell.
+function paintBytes(bytes) {
   WALL.clear();
   for (let i = 0; i < WALL.grid * WALL.grid; i++) {
     const r = bytes[i * 3];
@@ -181,12 +199,8 @@ function paintBytes(bytes, color) {
     if (r === 0 && g === 0 && b === 0) continue;
     const x = i % WALL.grid;
     const y = (i / WALL.grid) | 0;
-    // The scroller's bytes carry intensity; the color rides in as the hue.
-    const k = Math.max(r, Math.max(g, b)) / 255;
-    WALL.ctx.globalAlpha = k;
-    WALL.ctx.fillStyle = color;
+    WALL.ctx.fillStyle = `rgb(${r},${g},${b})`;
     WALL.ctx.fillRect(x * WALL.cell, y * WALL.cell, WALL.cell, WALL.cell);
-    WALL.ctx.globalAlpha = 1;
   }
 }
 
