@@ -22,6 +22,14 @@ export const CONTENT_PROTOCOL_V = 1;
 
 export const CONTENT_KINDS = ['clear', 'fill', 'rect', 'text', 'anim'];
 
+/**
+ * Named animations the content pages know how to draw. Every one is a pure
+ * function of server time, so all instances - tabs, control pages, the
+ * headless capture browser - render the identical frame at the same second.
+ * 'off' stops animation (black); 'demo' is the original bouncing block.
+ */
+export const ANIM_NAMES = ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock', 'off'];
+
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$|^[a-zA-Z]+$/;
 
 function isColor(v) {
@@ -90,7 +98,7 @@ export function parseMessage(data) {
       return m;
     }
     case 'anim':
-      return data.name === 'demo' || data.name === 'off'
+      return ANIM_NAMES.includes(data.name)
         ? {v: CONTENT_PROTOCOL_V, kind: 'anim', name: data.name}
         : null;
     default:

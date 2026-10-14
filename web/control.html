@@ -20,6 +20,7 @@
   .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
   button { font: inherit; padding: 8px 14px; background: #222; color: #ccc; border: 1px solid #444; border-radius: 6px; cursor: pointer; }
   button:hover { background: #333; }
+  button.on { background: #264; border-color: #6fa; color: #eaffea; }
   input[type=text] { font: inherit; padding: 8px; background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; }
   #status { font-family: ui-monospace, monospace; color: #6f6; white-space: pre; }
   .hint { color: #888; max-width: 560px; }
@@ -41,8 +42,17 @@
 <div class="row">
   <button id="send" type="button">Send text</button>
   <button id="fill" type="button">Fill</button>
-  <button id="demo" type="button">Demo</button>
   <button id="clear" type="button">Clear</button>
+</div>
+
+<div class="row anims">
+  <button data-anim="demo" type="button">Demo</button>
+  <button data-anim="bounce" type="button">Bounce</button>
+  <button data-anim="rain" type="button">Rain</button>
+  <button data-anim="fire" type="button">Fire</button>
+  <button data-anim="plasma" type="button">Plasma</button>
+  <button data-anim="bars" type="button">Bars</button>
+  <button data-anim="clock" type="button">Clock</button>
 </div>
 
 <p><output id="status">connecting…</output></p>
@@ -71,8 +81,18 @@ $('send').addEventListener('click', () => {
   send(makeMessage('text', { text, color: $('color').value }), `text ${text.slice(0, 24)}`);
 });
 $('fill').addEventListener('click', () => send(makeMessage('fill', { color: $('color').value }), 'fill'));
-$('demo').addEventListener('click', () => send(makeMessage('anim', { name: 'demo' }), 'demo'));
 $('clear').addEventListener('click', () => send(makeMessage('clear'), 'clear'));
+
+// Every animation button posts {kind:'anim', name}; the content pages draw
+// it as a pure function of the server clock, so all instances - tabs and
+// the wall's capture browser - animate in phase from the same second.
+for (const b of document.querySelectorAll('button[data-anim]')) {
+  b.addEventListener('click', () => {
+    send(makeMessage('anim', { name: b.dataset.anim }), b.dataset.anim);
+    for (const o of document.querySelectorAll('button[data-anim]')) o.classList.remove('on');
+    b.classList.add('on');
+  });
+}
 
 // Enter in the text box sends, like a ticker.
 $('text').addEventListener('keydown', (e) => {
@@ -91,6 +111,11 @@ async function watch() {
       : s.kind === 'anim' ? s.name
       : s.kind;
     set(`server rev ${j.rev} · ${what}`);
+    // Light up the animation button that matches the server's current state,
+    // so any control tab shows what any other tab (or the wall) is showing.
+    for (const o of document.querySelectorAll('button[data-anim]')) {
+      o.classList.toggle('on', s.kind === 'anim' && o.dataset.anim === s.name);
+    }
   } catch {
     set('server unreachable', false);
   }

@@ -4,6 +4,7 @@ import {
   CONTENT_CHANNEL,
   CONTENT_PROTOCOL_V,
   CONTENT_KINDS,
+  ANIM_NAMES,
   makeMessage,
   parseMessage,
 } from '../core/content-protocol.js';
@@ -48,9 +49,12 @@ test('text requires non-empty bounded text; options are validated', () => {
   assert.throws(() => makeMessage('text', {text: 'hi', loop: 'yes'}), RangeError);
 });
 
-test('anim is demo or off, nothing else', () => {
+test('anim is a known name, nothing else', () => {
   assert.deepEqual(makeMessage('anim', {name: 'demo'}), {v: 1, kind: 'anim', name: 'demo'});
   assert.deepEqual(makeMessage('anim', {name: 'off'}), {v: 1, kind: 'anim', name: 'off'});
+  for (const name of ANIM_NAMES) {
+    assert.equal(makeMessage('anim', {name}).name, name);
+  }
   assert.throws(() => makeMessage('anim', {name: 'party'}), RangeError);
 });
 

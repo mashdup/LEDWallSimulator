@@ -186,9 +186,43 @@ test('two real browser tabs agree on the content after one POST', async () => {
     assert.match(await waitFor(statusIs(tabA, /text: SYNCED WALL/, 'tab A shows text')), /text: SYNCED WALL/);
     assert.match(await waitFor(statusIs(tabB, /text: SYNCED WALL/, 'tab B shows text')), /text: SYNCED WALL/);
 
+    // Pixel identity: a static state must render byte-identical canvases in
+    // both tabs - the property the wall depends on, since its capture page
+    // is just another instance. (Static chosen deliberately: an animation
+    // sampled across a second boundary would differ by one frame, which is
+    // in-phase behavior, not a bug.)
+    await fetch(`${serve.base}/content`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({v: 1, kind: 'fill', color: '#ff0000'}),
+    });
+    const fillIs = (session, label) => async () => {
+      const t = await cdp.eval(session, 'document.getElementById("status").textContent');
+      return /fill/.test(t) ? t : null;
+    };
+    await waitFor(fillIs(tabA, 'tab A shows fill'));
+    await waitFor(fillIs(tabB, 'tab B shows fill'));
+    const canvasIs = (session) => async () => {
+      const d = await cdp.eval(session, 'document.getElementById("wall").toDataURL()');
+      return d.includes('base64,') ? d : null;
+    };
+    const a = await waitFor(canvasIs(tabA));
+    const b = await waitFor(canvasIs(tabB));
+    assert.equal(a, b, 'two instances must render the identical frame');
+
+    // An animation name must reach both tabs too (status is the ack; the
+    // frames themselves are pure functions of the shared server clock).
+    await fetch(`${serve.base}/content`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({v: 1, kind: 'anim', name: 'plasma'}),
+    });
+    assert.match(await waitFor(statusIs(tabA, /plasma/, 'tab A shows plasma')), /plasma/);
+    assert.match(await waitFor(statusIs(tabB, /plasma/, 'tab B shows plasma')), /plasma/);
+
     // And the control page's own status mirrors the server state.
     const ctl = await cdp.openTab(`${serve.base}/control.html`);
-    assert.match(await waitFor(statusIs(ctl, /rev \d+ · text: SYNCED WALL/, 'control mirrors server')), /rev \d+ · text: SYNCED WALL/);
+    assert.match(await waitFor(statusIs(ctl, /rev \d+ · plasma/, 'control mirrors server')), /rev \d+ · plasma/);
   } finally {
     proc.kill();
     await serve.stop();
