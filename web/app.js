@@ -598,9 +598,21 @@ $('pageEnd').addEventListener('click', () => {
 // status line is the acknowledgement, and parseMessage there is the gate -
 // makeMessage here throws on an illegal payload, so a broken command is a
 // visible console error at the sender, never a silent half-action.
-const contentChannel = new BroadcastChannel(CONTENT_CHANNEL);
+// BroadcastChannel needs a real origin: a file:// page has an opaque one and
+// the constructor throws. Say so on the page instead of failing silently -
+// a file:// app tab and an http content tab are different channel worlds,
+// and "the buttons do nothing" is otherwise invisible.
+const contentChannel = (() => {
+  try {
+    return new BroadcastChannel(CONTENT_CHANNEL);
+  } catch {
+    setOutput($('contentOut'), 'no channel: open this page from http://127.0.0.1:8080/', 'err');
+    return null;
+  }
+})();
 
 function sendContent(m, label) {
+  if (contentChannel === null) return;
   try {
     contentChannel.postMessage(m);
     setOutput($('contentOut'), `sent: ${label}`);

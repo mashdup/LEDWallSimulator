@@ -204,3 +204,23 @@ test('the same page served over loopback boots the app and stays quiet', async (
     await serve.stop();
   }
 });
+
+test('content.html served boots its module: demo running, channel live', async (t) => {
+  const port = await freePort();
+  const serve = await startServe(port);
+  try {
+    const dom = dumpDom(`${serve.base}/content.html?wall=1`, 4000);
+    if (dom === null) {
+      t.skip('no Chrome/Chromium/Edge on this machine');
+      return;
+    }
+    // The module body ran to its end: the demo started and the status line
+    // says so. A page whose imports failed (file://, a 404 in core/) leaves
+    // the status at its markup value, which is exactly the silent failure
+    // this test exists to catch - the content page is the far end of the
+    // content protocol, and a dead listener there is invisible from the app.
+    assert.match(inner(dom, 'status'), /demo/, 'content module must run and mark its status');
+  } finally {
+    await serve.stop();
+  }
+});

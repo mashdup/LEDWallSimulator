@@ -63,11 +63,16 @@
     <button id="fill">fill white</button>
     <button id="black">black</button>
   </p>
+  <p>
+    <output id="status" class="mono">idle</output>
+  </p>
 </div>
 
 <script type="module">
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
+import { CONTENT_CHANNEL, parseMessage } from '../core/content-protocol.js';
+import { Panel, Scroller } from '../core/index.js';
 /*
  * WALL — the drawing API for this page's canvas, sized to the panel.
  *
@@ -101,12 +106,102 @@ const WALL = (() => {
 })();
 window.WALL = WALL;
 
+// ---- remote control: the driver tab speaks the content protocol ------------
+// BroadcastChannel, same origin: the wall app (or any control tab) publishes
+// validated commands; this page executes them. A malformed message is a
+// silent drop - parseMessage is the single authority on what is legal.
+// file:// pages have an opaque origin and the constructor throws: say so.
+
+let channel = null;
+try {
+  channel = new BroadcastChannel(CONTENT_CHANNEL);
+} catch {
+  setOutput('no channel: open from http://127.0.0.1:8080/');
+}
+if (channel !== null) {
+  channel.onmessage = (e) => {
+    const m = parseMessage(e.data);
+    if (m === null) return;
+    apply(m);
+    setOutput(m.kind === 'text' ? `text: ${m.text.slice(0, 24)}` : m.kind);
+  };
+}
+
+function apply(m) {
+  switch (m.kind) {
+    case 'clear':
+      stop();
+      WALL.clear();
+      break;
+    case 'fill':
+      stop();
+      WALL.clear();
+      WALL.rect(0, 0, WALL.grid, WALL.grid, m.color);
+      break;
+    case 'rect':
+      WALL.rect(m.x, m.y, m.w, m.h, m.color);
+      break;
+    case 'anim':
+      if (m.name === 'demo') demo();
+      else { stop(); WALL.clear(); }
+      break;
+    case 'text':
+      banner(m);
+      break;
+  }
+}
+
+// A text command scrolls through the same core Scroller the wall app's text
+// mode uses, drawn onto this canvas - one banner implementation, two hosts.
+let bannerClock = null;
+
+function banner(m) {
+  stop();
+  if (bannerClock !== null) bannerClock.terminate();
+  const scroller = new Scroller(m.text, {
+    panel: new Panel(),
+    fps: m.fps ?? 12,
+    step: m.step ?? 1,
+    loop: m.loop ?? true,
+  });
+  const color = m.color ?? '#ffffff';
+  bannerClock = createClock(1000 / scroller.fps).start();
+  bannerClock.onTick = () => {
+    paintBytes(scroller.frame(), color);
+  };
+}
+
+// 1200 RGB bytes -> the canvas, one fillRect per lit cell.
+function paintBytes(bytes, color) {
+  WALL.clear();
+  for (let i = 0; i < WALL.grid * WALL.grid; i++) {
+    const r = bytes[i * 3];
+    const g = bytes[i * 3 + 1];
+    const b = bytes[i * 3 + 2];
+    if (r === 0 && g === 0 && b === 0) continue;
+    const x = i % WALL.grid;
+    const y = (i / WALL.grid) | 0;
+    // The scroller's bytes carry intensity; the color rides in as the hue.
+    const k = Math.max(r, Math.max(g, b)) / 255;
+    WALL.ctx.globalAlpha = k;
+    WALL.ctx.fillStyle = color;
+    WALL.ctx.fillRect(x * WALL.cell, y * WALL.cell, WALL.cell, WALL.cell);
+    WALL.ctx.globalAlpha = 1;
+  }
+}
+
 // ---- demo: proves the loop end-to-end (canvas -> capture -> wall) ----------
 // The tempo lives in a worker, not requestAnimationFrame: a hidden tab's rAF
 // stops entirely, which would freeze the wall's view of this page the moment
 // the tab loses focus. Worker ticks keep the animation running at full rate.
 
 let clock = null;
+
+function stop() {
+  if (clock !== null) clock.terminate();
+  clock = null;
+  if (bannerClock !== null) { bannerClock.terminate(); bannerClock = null; }
+}
 
 function demo() {
   stop();
@@ -137,6 +232,7 @@ function setOutput(text) {
 }
 
 demo();
+setOutput('demo'); // proof of a live module: the dump-dom test asserts on this
 </script>
 </body>
 </html>
