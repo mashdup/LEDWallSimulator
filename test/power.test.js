@@ -286,3 +286,34 @@ test('observe still fires when the real current crosses the real limit', () => {
   assert.ok(budget.k < 1, 'a frame over the hard limit must lower the ceiling');
   assert.ok(budget.clampedFrames >= 1);
 });
+
+// The headroom slider is a margin control, and the adaptive ceiling is a
+// one-way ratchet (only reset() brightens the wall back). So the app's
+// headroom handler must reset like the limit handler does: raising headroom
+// clamps k, and lowering it recovers nothing while the ratchet holds.
+test('headroom cycle: raising it clamps, lowering it with a reset recovers', () => {
+  const budget = new PowerBudget(18000, { headroom: 0.1 });
+  const panel = new Panel();
+  panel.fill(255, 255, 255);
+  const bytes = new Uint8Array(1200).fill(255);
+  const render = (k) => bytes.map((v) => (v * k) | 0);
+
+  let k = budget.brightnessFor(panel, 1);
+  budget.observe(render(k));
+  assert.ok(k > 0.6, `baseline clamp ~0.675, got ${k}`);
+
+  // Raise headroom to 0.9: margin 1800 mA against 24000 => k ~0.075.
+  budget.headroom = 0.9;
+  k = budget.brightnessFor(panel, 1);
+  assert.ok(k < 0.1, `headroom 0.9 must clamp hard, got ${k}`);
+  budget.observe(render(k));
+
+  // Lower it back. Without a reset the ratchet holds the 0.075 clamp forever;
+  // with one (the app's handler), k returns to the 0.675 the margin allows.
+  budget.headroom = 0.1;
+  assert.ok(budget.brightnessFor(panel, 1) < 0.1, 'the ratchet must hold without a reset');
+  budget.reset();
+  k = budget.brightnessFor(panel, 1);
+  assert.ok(k > 0.6, `after reset k must recover, got ${k}`);
+  assert.equal(budget.toMeta().brightness, Math.round(k * 255));
+});

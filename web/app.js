@@ -596,6 +596,15 @@ $('limitMa').addEventListener('change', () => {
 });
 $('headroom').addEventListener('change', () => {
   budget.headroom = Number($('headroom').value);
+  // Same contract as the limit slider: the adaptive ceiling is a one-way
+  // ratchet by design (only a reset brightens the wall back), so widening
+  // the margin MUST reset it — raising headroom clamps k, lowering it
+  // recovers nothing while the ratchet holds the old clamp. And the wall
+  // must be told: the meta brightness rides the reset k.
+  budget.reset();
+  const m = budget.toMeta();
+  lastMetaBr = m.brightness;
+  sink?.send(meta(m));
 });
 
 $('connect').addEventListener('click', connect);
