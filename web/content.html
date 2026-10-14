@@ -211,9 +211,17 @@ function draw() {
 // deterministic hashes of coordinates - the same pixels in every renderer,
 // forever in phase. t is seconds since the epoch, shared by all.
 
-function animDraw(name, t) {
+function animDraw(name, tRaw) {
   WALL.clear();
   const G = WALL.grid;
+  // Wrap the epoch clock into a compact range BEFORE any periodic math.
+  // t is ~1.8e9 seconds: t*12 lands at 2e10, where a double's spacing is
+  // ~4000 - modulo and hue arithmetic quantize into giant chaotic jumps,
+  // which the eye reads as flicker and restarts. One hour of phase is all
+  // any of these need; the wrap discontinuity is once an hour, invisible.
+  // 'clock' is the one animation that must see the raw epoch (it shows real
+  // time), so it takes tRaw.
+  const t = tRaw % 3600;
   switch (name) {
     case 'off':
       return;
@@ -289,7 +297,7 @@ function animDraw(name, t) {
     case 'clock': {
       // A real wall clock: hands from the server's epoch time, so every
       // instance reads the same second - and the wall keeps time.
-      const d = new Date(t * 1000);
+      const d = new Date(tRaw * 1000);
       const sec = d.getSeconds() + d.getMilliseconds() / 1000;
       const min = d.getMinutes() + sec / 60;
       const hr = (d.getHours() % 12) + min / 60;
