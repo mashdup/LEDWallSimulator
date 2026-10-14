@@ -102,7 +102,7 @@ function parseArgs(argv) {
 
   const explicit = flag !== null || process.env.PORT !== undefined;
   const raw = flag ?? process.env.PORT ?? null;
-  if (raw === null) return { port: null, explicit: false, browser };
+  if (raw === null) return { port: null, explicit: false, browser, app };
 
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -196,6 +196,12 @@ function openAppWindow(url) {
   // window instead of tab-ifying in the old one.
   killStaleInstances();
   for (let i = 0; i < 20 && staleInstancesAlive(); i++) sleepMs(250);
+  // The count hits zero before the profile is actually released: dying
+  // Chrome's children (crashpad, GPU) keep writing into it for a moment.
+  // Wiping in that window partially fails, the Singleton lock survives, and
+  // the new Chrome delegates to the corpse and exits silently (measured:
+  // profile created, zero processes, no output). Let the corpse settle.
+  sleepMs(1500);
   // A reused profile restores its previous session: after any earlier run,
   // Chromium reopens a normal tab window and --app is IGNORED (measured:
   // fresh profile 39 px app window, reused profile 95 px tab window; deleting
@@ -218,8 +224,13 @@ function openAppWindow(url) {
     // fps) without reserving a fixed port, and it is loopback-only.
     '--remote-debugging-port=0',
   ];
-  const proc = spawn(chrome, args, { stdio: 'ignore', windowsHide: true, detached: true });
+  const proc = spawn(chrome, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });
   proc.unref();
+  // Chrome's own words when the show window misbehaves (a dying browser
+  // process is otherwise silent: stdio 'ignore' hides the exit reason).
+  proc.stdout?.on('data', (d) => process.stdout.write(`app: ${d}`));
+  proc.stderr?.on('data', (d) => process.stderr.write(`app: ${d}`));
+  proc.once('exit', (code) => console.log(`app: window process exited (code ${code})`));
   proc.once('error', () => {
     console.log(`start: could not launch ${chrome}. Open ${url} in any Chrome,`);
     console.log('       or set LED_CHROME to the browser executable.');
