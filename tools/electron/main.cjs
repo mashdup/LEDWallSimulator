@@ -19,9 +19,19 @@ const path = require('node:path');
 
 const url = process.argv.find((a) => /^http:\/\//.test(a)) ?? 'http://127.0.0.1:8080/';
 
+// Dedicated userData inside the repo: the default (%APPDATA\<package name>)
+// collides with any other instance of this package - two instances fighting
+// over one cache directory produce 'Unable to move the cache: Access is
+// denied' noise, and the single-instance lock then quits the newcomer with
+// code 0, which reads like a crash. A known directory, plus the explicit
+// message below, makes both outcomes legible.
+app.setPath('userData', path.join(__dirname, '..', '..', '.wall-electron'));
+
 // One show per machine: a second launch focuses the first window instead of
 // opening a second wall (Chrome's delegation, done sanely).
 if (!app.requestSingleInstanceLock()) {
+  console.log('electron: another wall instance is already running - focused it instead of opening a second window.');
+  console.log('electron: if that window is from an old session, close it (or Ctrl+C its launcher) and run again.');
   app.quit();
 } else {
   app.on('second-instance', () => {

@@ -145,8 +145,17 @@ function openElectronWindow(url) {
   const main = fileURLToPath(new URL('./electron/main.cjs', import.meta.url));
   const proc = spawn(bin, [main, url], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });
   proc.unref();
-  proc.stdout?.on('data', (d) => process.stdout.write(`electron: ${d}`.replace(/electron: electron: /g, 'electron: ')));
-  proc.stderr?.on('data', (d) => process.stderr.write(`electron: ${d}`.replace(/electron: electron: /g, 'electron: ')));
+  // The single-instance newcomer touches the shared cache dir before it
+  // notices the lock and exits; those errors are its last words, not the
+  // show's. Drop them (and keep everything else visible).
+  const NOISE = /Unable to move the cache|Unable to create cache|Gpu Cache Creation/;
+  const relay = (to) => (d) => {
+    for (const line of String(d).split(/\r?\n/)) {
+      if (line.trim() !== '' && !NOISE.test(line)) to.write(`electron: ${line}\n`.replace(/electron: electron: /g, 'electron: '));
+    }
+  };
+  proc.stdout?.on('data', relay(process.stdout));
+  proc.stderr?.on('data', relay(process.stderr));
   proc.once('exit', (code) => console.log(`electron: window process exited (code ${code})`));
   proc.once('error', (e) => {
     console.log(`start: could not launch electron (${e.code}). Open the URL in any Chrome as a fallback.`);
