@@ -173,7 +173,16 @@ function describe() {
 // ---- the renderer: draw(state, serverTime), nothing else --------------------
 
 const clock = createClock(33).start(); // ~30 fps
+let lastTick = performance.now();
 clock.onTick = () => {
+  // Chrome throttles hidden tabs (and their workers) to ~1 Hz; say so on the
+  // page instead of letting the wall silently freeze. The first click here
+  // starts the silent-audio keep-alive, which lifts the throttling.
+  const now = performance.now();
+  if (now - lastTick > 500 && document.hidden) {
+    setOutput('THROTTLED (hidden tab): click this page, keep it visible');
+  }
+  lastTick = now;
   draw();
   pushFrame();
 };

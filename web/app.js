@@ -43,6 +43,7 @@ import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
 import { CONTENT_CHANNEL, makeMessage } from '../core/content-protocol.js';
+import { animFrame } from '../core/animations.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -601,6 +602,90 @@ $('pageEnd').addEventListener('click', () => {
   if (renderer instanceof Panner) renderer.seek(1);
 });
 
+// Content frame generator: when page mode points at /content/frame, THIS
+// tab generates the wall's frames. The alternative - a content tab pushing
+// its own canvas - fails exactly when it matters: a hidden content tab is
+// throttled to ~1 Hz (measured: 0.3 fps) and the wall freezes. The app tab
+// holds the audio keep-alive from the Connect click, is never throttled,
+// and is the driver anyway: it polls the content state, renders the pure
+// animation library (core/animations.js) at the server's phase, and pushes
+// a 20x20 JPEG the page source fetches a few ms later. The content tab
+// becomes an optional mirror, and a hidden one costs nothing.
+const cPanel = new Panel();
+const cCanvas = document.createElement('canvas');
+cCanvas.width = 20;
+cCanvas.height = 20;
+const cCtx = cCanvas.getContext('2d');
+let cState = { kind: 'demo' };
+let cRev = -1;
+let cServerAt = Date.now();
+let cLocalAt = performance.now();
+let cScroller = null;
+let cPassMs = 0;
+let cPushing = false;
+
+async function pollContent() {
+  try {
+    const r = await fetch('/content', { cache: 'no-store' });
+    if (!r.ok) return;
+    const j = await r.json();
+    cServerAt = j.at;
+    cLocalAt = performance.now();
+    if (j.rev !== cRev) {
+      cRev = j.rev;
+      cState = j.state;
+      cScroller = null;
+      if (j.state.kind === 'text') {
+        const src = new Banner({ fallback: j.state.text, color: j.state.color ?? '#ffffff' });
+        cScroller = new Scroller({
+          panel: cPanel,
+          source: src.bitmap(),
+          cellsPerFrame: j.state.step ?? 1,
+          direction: -1,
+        });
+        cPassMs = cScroller.passDurationMs(30);
+      }
+    }
+  } catch {
+    // Server unreachable: keep the last state; the wall holds its frame.
+  }
+}
+setInterval(pollContent, 100);
+pollContent();
+
+function pushContentFrame() {
+  if (page.endpoint !== '/content/frame' || cPushing) return;
+  cPushing = true;
+  const tSec = cServerAt / 1000 + (performance.now() - cLocalAt) / 1000;
+  let bytes;
+  if (cState.kind === 'text' && cScroller !== null) {
+    cScroller.seek(((tSec * 1000) % cPassMs) / cPassMs);
+    cScroller.render(cPanel);
+    bytes = cPanel.pixels;
+  } else {
+    bytes = animFrame(cState, tSec);
+  }
+  const img = cCtx.createImageData(20, 20);
+  for (let i = 0; i < 400; i++) {
+    img.data[i * 4] = bytes[i * 3];
+    img.data[i * 4 + 1] = bytes[i * 3 + 1];
+    img.data[i * 4 + 2] = bytes[i * 3 + 2];
+    img.data[i * 4 + 3] = 255;
+  }
+  cCtx.putImageData(img, 0, 0);
+  cCanvas.toBlob((blob) => {
+    if (blob === null) {
+      cPushing = false;
+      return;
+    }
+    fetch('/content/frame', {
+      method: 'POST',
+      headers: { 'content-type': 'image/jpeg' },
+      body: blob,
+    }).catch(() => {}).then(() => { cPushing = false; });
+  }, 'image/jpeg', 0.85);
+}
+
 // Content control: publish protocol commands to the companion content page
 // over BroadcastChannel. The channel is fire-and-forget; the content page's
 // status line is the acknowledgement, and parseMessage there is the gate -
@@ -711,6 +796,7 @@ clock.onTick = () => {
     next = Math.max(next + FRAME_MS, now - FRAME_MS);
     try {
       tick();
+      pushContentFrame();
     } catch (err) {
       // The clock is the only thing keeping the stream alive, so a throw
       // escaping tick() would cost the wall every frame after it, not just
