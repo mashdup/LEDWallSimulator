@@ -105,9 +105,15 @@ export class PowerBudget {
     this.worstFullMa = Math.max(this.worstFullMa, atFull);
 
     const limit = this.effectiveLimitMa;
-    let k = want;
+    // this.k is the adaptive ceiling: ONE state, shared with observe() and
+    // toMeta(). Folding it into the returned k means the brightness the page
+    // applies, the brightness the meta record declares, and the ceiling an
+    // over-budget frame lowers are the same number — the wall cannot be lit
+    // with one and told another.
+    let k = Math.min(want, this.k);
     if (this.worstFullMa > limit) k = Math.min(k, limit / this.worstFullMa);
     k = Math.max(this.minBrightness, k);
+    this.k = k;
 
     this.lastMa = atFull * k;
     if (this.lastMa > this.peakMa) this.peakMa = this.lastMa;
@@ -121,9 +127,17 @@ export class PowerBudget {
     const ma = estimateCurrentMa(physicalBytes, { perChannelMa: this.perChannelMa });
     this.lastMa = ma;
     if (ma > this.peakMa) this.peakMa = ma;
-    const limit = this.effectiveLimitMa;
-    if (ma > limit) {
-      this.k = Math.max(this.minBrightness, this.k * (limit / ma));
+    /* Compare against the FULL limit, not effectiveLimitMa. brightnessFor has
+     * already aimed the frame at effectiveLimitMa, so at the clamp point the
+     * rendered estimate sits exactly on that margin, and integer rounding in
+     * the scale path puts it a hair over. Firing the decay there made every
+     * clamped frame multiply this.k by ~0.9996 forever: a full-white panel
+     * spiralled to the minBrightness floor (k=0.05, meta br=13) and the wall
+     * went permanently dull with no way back. The headroom belongs to
+     * brightnessFor; observe() is the last line, and it fires only when the
+     * real current crosses the real limit. */
+    if (ma > this.limitMa) {
+      this.k = Math.max(this.minBrightness, this.k * (this.limitMa / ma));
       this.clampedFrames++;
     }
     return ma;

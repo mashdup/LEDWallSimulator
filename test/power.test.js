@@ -241,3 +241,48 @@ test('PeakMeter rejects a nonsense window', () => {
   assert.throws(() => new PeakMeter(-2), RangeError);
   assert.throws(() => new PeakMeter(2.5), RangeError);
 });
+
+// -------------------------------------------------------------------------
+// The full-white death spiral (live panel, 2026-10-14): a full-white panel at
+// limit 18000 mA aims brightnessFor at effectiveLimitMa = 16200; the rendered
+// bytes then estimate a hair OVER that margin from integer rounding, and the
+// old observe() fired its multiplicative decay against effectiveLimitMa — so
+// every single frame multiplied k by ~0.9996 with no recovery. The wall
+// spiralled to the minBrightness floor (k=0.05) and the meta record carried
+// br=13: the panel sat at 5% brightness, dull, with the slider looking dead.
+// -------------------------------------------------------------------------
+
+test('a sustained full-white panel settles at the clamp, it does not spiral to the floor', () => {
+  const budget = new PowerBudget(18000); // headroom 0.1 => effective 16200
+  const panel = new Panel();
+  panel.fill(255, 255, 255);
+  const layout = { map: null }; // pack through identity-ish: build bytes by hand
+  const bytes = new Uint8Array(1200).fill(255);
+
+  let k = 1;
+  for (let frame = 0; frame < 600; frame++) {
+    k = budget.brightnessFor(panel, 1);
+    const rendered = bytes.map((v) => (v * k) | 0); // the app's scale path
+    budget.observe(rendered);
+  }
+
+  // 16200 / 24000 = 0.675, and the floor is 0.05: the spiral ended at the floor.
+  assert.ok(k > 0.6, `k settled at ${k}; must hold near the 0.675 clamp, not decay`);
+  assert.ok(budget.k > 0.6, `adaptive ceiling decayed to ${budget.k}`);
+});
+
+test('toMeta brightness is the k that is actually applied - one state, not two', () => {
+  const budget = new PowerBudget(18000);
+  const panel = new Panel();
+  panel.fill(255, 255, 255);
+  const k = budget.brightnessFor(panel, 1);
+  assert.equal(budget.toMeta().brightness, Math.round(k * 255));
+});
+
+test('observe still fires when the real current crosses the real limit', () => {
+  const budget = new PowerBudget(1000);
+  const over = new Uint8Array(1200).fill(255); // 24000 mA against a 1000 mA limit
+  budget.observe(over);
+  assert.ok(budget.k < 1, 'a frame over the hard limit must lower the ceiling');
+  assert.ok(budget.clampedFrames >= 1);
+});
