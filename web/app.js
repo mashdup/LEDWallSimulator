@@ -649,6 +649,12 @@ $('pageEnd').addEventListener('click', () => {
   if (renderer instanceof Panner) renderer.seek(1);
 });
 
+// Chrome throttles hidden tabs (and their workers) to ~1 Hz; the audio
+// exemption is the in-page escape, and any click grants it. Connect is the
+// main gesture, but the frame loop needs the exemption even before a sink
+// exists - so any first interaction on the page arms it, not just Connect.
+addEventListener('pointerdown', () => startKeepAlive(), { once: true });
+
 // Content frame generator: when page mode points at /content/frame, THIS
 // tab generates the wall's frames. The alternative - a content tab pushing
 // its own canvas - fails exactly when it matters: a hidden content tab is

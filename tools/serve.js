@@ -298,7 +298,7 @@ async function handleContentPost(req, res) {
  *
  * Only the LATEST frame is kept - the wall is a display, not a recorder.
  */
-const contentFrame = { png: null, type: 'image/jpeg', at: 0 };
+const contentFrame = { png: null, type: 'image/jpeg', hash: null, at: 0 };
 
 async function handleContentFramePost(req, res) {
   const chunks = [];
@@ -313,6 +313,11 @@ async function handleContentFramePost(req, res) {
     chunks.push(chunk);
   }
   contentFrame.png = Buffer.concat(chunks);
+  // The hash lets PageSource skip decoding identical frames - the same
+  // contract the /capture route offers. Without it, a poller must decode
+  // every poll (correct), and with a null-vs-null compare written as
+  // 'changed', it must never decode at all (the frozen wall this fixes).
+  contentFrame.hash = createHash('sha256').update(contentFrame.png).digest('hex').slice(0, 16);
   // Echo back what was pushed; the pusher declares the encoding.
   contentFrame.type = req.headers['content-type'] ?? 'image/jpeg';
   contentFrame.at = Date.now();
@@ -324,7 +329,12 @@ function handleContentFrameGet(req, res) {
     respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no frame pushed yet\n');
     return;
   }
-  respond(res, 200, { 'Content-Type': contentFrame.type, 'Cache-Control': 'no-store' }, contentFrame.png);
+  respond(res, 200, {
+    'Content-Type': contentFrame.type,
+    'Cache-Control': 'no-store',
+    'X-Capture-Hash': contentFrame.hash,
+    'X-Capture-Ms': String(Date.now() - contentFrame.at),
+  }, contentFrame.png);
 }
 
 const server = createServer(async (req, res) => {

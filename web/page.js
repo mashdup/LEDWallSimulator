@@ -191,12 +191,14 @@ export class PageSource {
         reload,
       });
       // Decode only when the pixels differ. `hash` is the route's sha256 of the
-      // PNG; if a proxy ever strips that header the key is null and every poll
-      // re-decodes, which is correct-but-wasteful rather than wrong.
+      // PNG; when a route sends no hash (the push route did, originally) the
+      // key is null - and a null key must DECODE, not skip: comparing
+      // null !== null is false, so a source without hashes never decodes its
+      // first frame and the wall sits at 'capturing…' forever.
       const key = meta.hash === null || meta.hash === undefined
         ? null
         : `${meta.hash}|${meta.width}x${meta.height}`;
-      const changed = key !== this.#rasterKey;
+      const changed = key === null || key !== this.#rasterKey;
       if (changed) this.#raster = await this.#decode(blob);
       this.#rasterKey = key;
       this.#meta = meta;
