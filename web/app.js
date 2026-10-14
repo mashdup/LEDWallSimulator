@@ -42,6 +42,7 @@ import { PageSource } from './page.js';
 import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
+import { CONTENT_CHANNEL, makeMessage } from '../core/content-protocol.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -590,6 +591,37 @@ $('pageRestart').addEventListener('click', () => {
 });
 $('pageEnd').addEventListener('click', () => {
   if (renderer instanceof Panner) renderer.seek(1);
+});
+
+// Content control: publish protocol commands to the companion content page
+// over BroadcastChannel. The channel is fire-and-forget; the content page's
+// status line is the acknowledgement, and parseMessage there is the gate -
+// makeMessage here throws on an illegal payload, so a broken command is a
+// visible console error at the sender, never a silent half-action.
+const contentChannel = new BroadcastChannel(CONTENT_CHANNEL);
+
+function sendContent(m, label) {
+  try {
+    contentChannel.postMessage(m);
+    setOutput($('contentOut'), `sent: ${label}`);
+  } catch (err) {
+    setOutput($('contentOut'), err.message, 'err');
+  }
+}
+
+$('contentSend').addEventListener('click', () => {
+  const text = $('contentText').value.trim();
+  if (text === '') return;
+  sendContent(makeMessage('text', {text, color: $('contentColor').value}), `text ${text.slice(0, 24)}`);
+});
+$('contentFill').addEventListener('click', () => {
+  sendContent(makeMessage('fill', {color: $('contentColor').value}), 'fill');
+});
+$('contentClear').addEventListener('click', () => {
+  sendContent(makeMessage('clear'), 'clear');
+});
+$('contentDemo').addEventListener('click', () => {
+  sendContent(makeMessage('anim', {name: 'demo'}), 'demo');
 });
 
 

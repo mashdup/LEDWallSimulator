@@ -127,15 +127,14 @@ function demo() {
   };
 }
 
-function stop() {
-  if (clock !== null) clock.terminate();
-  clock = null;
-}
-
 document.getElementById('demo').addEventListener('click', () => { startKeepAlive(); demo(); });
 document.getElementById('stop').addEventListener('click', () => { stop(); WALL.clear(); });
 document.getElementById('fill').addEventListener('click', () => { stop(); WALL.rect(0, 0, WALL.grid, WALL.grid, '#fff'); });
 document.getElementById('black').addEventListener('click', () => { stop(); WALL.clear(); });
+
+function setOutput(text) {
+  document.getElementById('status').textContent = text;
+}
 
 demo();
 </script>

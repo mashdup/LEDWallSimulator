@@ -95,6 +95,19 @@
       <output id="pageOut" class="mono"></output>
     </fieldset>
 
+    <fieldset id="contentControls">
+      <legend>Content control (companion page)</legend>
+      <label>Text <input id="contentText" size="28" placeholder="scroll this on content.html" spellcheck="false"></label>
+      <label>Color <input id="contentColor" size="9" value="#ffffff"></label>
+      <div class="row">
+        <button id="contentSend" type="button">Send text</button>
+        <button id="contentFill" type="button">Fill</button>
+        <button id="contentClear" type="button">Clear</button>
+        <button id="contentDemo" type="button">Demo</button>
+      </div>
+      <output id="contentOut" class="mono"></output>
+    </fieldset>
+
     <fieldset>
       <legend>Power</legend>
       <label>Limit <input id="limitMa" type="number" min="500" max="24000" step="100" value="8000"> mA</label>
