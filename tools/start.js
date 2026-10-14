@@ -44,6 +44,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { findChrome } from './capture.js';
@@ -127,6 +128,54 @@ function parseArgs(argv) {
  * fully isolated from the user's browsing: no extensions, no sign-in, no
  * Memory Saver, and nothing to clean up beyond deleting the directory.
  */
+const PROFILE_MATCH = 'wall-profile';
+
+/** Blocking sleep without a shell: Atomics.wait parks the thread. */
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function staleInstancesAlive() {
+  if (process.platform === 'win32') {
+    const out = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
+      `Where-Object CommandLine -like '*${PROFILE_MATCH}*' | ` +
+      'Measure-Object -Property ProcessId -Unique | Select-Object -ExpandProperty Count'],
+      { encoding: 'utf8', windowsHide: true });
+    return Number((out.stdout ?? '').trim()) > 0;
+  }
+  const out = spawnSync('pgrep', ['-f', PROFILE_MATCH], { encoding: 'utf8' });
+  return out.status === 0;
+}
+
+function killStaleInstances() {
+  if (process.platform === 'win32') {
+    spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
+      `Where-Object CommandLine -like '*${PROFILE_MATCH}*' | ` +
+      'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'],
+      { stdio: 'ignore', windowsHide: true });
+  } else {
+    spawnSync('pkill', ['-f', PROFILE_MATCH], { stdio: 'ignore' });
+  }
+}
+
+/**
+ * Delete the whole profile directory. Chrome's session-restore triggers are
+ * spread across the session files, Preferences (profile.exit_type), and the
+ * exit marker; clearing a subset proved whack-a-mole (a reused profile kept
+ * reopening tab windows). The profile is dedicated to the launcher and holds
+ * nothing worth keeping, so nuke it: the next start is a clean start.
+ */
+function resetProfile() {
+  const profileDir = fileURLToPath(new URL('../.wall-profile', import.meta.url));
+  try {
+    rmSync(profileDir, {recursive: true, force: true, maxRetries: 10, retryDelay: 300});
+  } catch {
+    // A dying instance may still hold a file; Chrome tolerates leftovers.
+  }
+}
+
 function openAppWindow(url) {
   let chrome;
   try {
@@ -138,19 +187,24 @@ function openAppWindow(url) {
   const profile = fileURLToPath(new URL('../.wall-profile', import.meta.url));
   // A second launch with the same profile DELEGATES to the running instance,
   // and delegated --app opens as a plain tab (verified: clean launch gives a
-  // 39 px title bar - a real app window; delegation gives a tab strip). The
-  // profile is dedicated to this launcher, so any instance carrying it is a
-  // stale one from a previous session: clear it before launching, so every
-  // `npm run wall` is a clean launch and always an app window.
-  if (process.platform === 'win32') {
-    spawnSync('powershell.exe', ['-NoProfile', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
-      "Where-Object CommandLine -like '*wall-profile*' | " +
-      'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'],
-      { stdio: 'ignore', windowsHide: true });
-  } else {
-    spawnSync('pkill', ['-f', 'wall-profile'], { stdio: 'ignore' });
-  }
+  // 39 px title bar - a real app window; delegation gives a 95 px tab strip).
+  // The profile is dedicated to this launcher, so any instance carrying it is
+  // a stale one from a previous session: clear it before launching, and WAIT
+  // for the processes to actually die - a launch that races a dying instance
+  // delegates to it and is back to a tab. Every `npm run wall` is therefore a
+  // clean launch: always an app window, and running it twice replaces the
+  // window instead of tab-ifying in the old one.
+  killStaleInstances();
+  for (let i = 0; i < 20 && staleInstancesAlive(); i++) sleepMs(250);
+  // A reused profile restores its previous session: after any earlier run,
+  // Chromium reopens a normal tab window and --app is IGNORED (measured:
+  // fresh profile 39 px app window, reused profile 95 px tab window; deleting
+  // the session files alone is not enough - Preferences' exit_type keeps
+  // triggering restore). The profile is disposable by design - the wall has
+  // no state worth restoring, and Web Serial grants need a fresh gesture
+  // after every page load anyway - so the launcher starts from a clean
+  // profile every time: always an app window, in ~2 s of rebuild.
+  resetProfile();
   const args = [
     `--app=${url}`,
     `--user-data-dir=${profile}`,
@@ -159,6 +213,10 @@ function openAppWindow(url) {
     '--no-first-run',
     '--no-default-browser-check',
     '--window-size=1280,800',
+    // Random loopback DevTools port, announced in <profile>/DevToolsActivePort.
+    // Cheap to keep: it makes the show window inspectable (window type,
+    // fps) without reserving a fixed port, and it is loopback-only.
+    '--remote-debugging-port=0',
   ];
   const proc = spawn(chrome, args, { stdio: 'ignore', windowsHide: true, detached: true });
   proc.unref();
@@ -241,15 +299,7 @@ function shutdown() {
   // match on the dedicated profile directory instead - precise (only our
   // isolated instance carries it) and leaves the user's own Chrome alone.
   if (appChild !== null) {
-    if (process.platform === 'win32') {
-      spawnSync('powershell.exe', ['-NoProfile', '-Command',
-        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
-        "Where-Object CommandLine -like '*wall-profile*' | " +
-        'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'],
-        { stdio: 'ignore', windowsHide: true });
-    } else {
-      spawnSync('pkill', ['-f', 'wall-profile'], { stdio: 'ignore' });
-    }
+    killStaleInstances();
   }
   const proc = child;
   if (proc === null) {

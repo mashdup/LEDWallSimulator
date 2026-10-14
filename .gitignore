@@ -25,3 +25,4 @@ firmware/wled-custom/*.log
 Thumbs.db
 desktop.ini
 .wall-profile/
+.bsl-test/
