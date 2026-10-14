@@ -196,9 +196,11 @@ clock.onTick = () => {
 //
 // The pushed frame is a 20x20 snapshot, not the 400x400 canvas: that IS
 // the wall's resolution. Encoding 400x400 (PNG ~100 ms, JPEG ~90 ms in
-// headless) caps the push near 10 fps; 20x20 JPEG encodes in ~1 ms and
-// the push runs at the full 30 fps. The app's auto-zoom fits any source
-// size to the grid, so a 20x20 source maps 1:1 with zero pan math.
+// headless) caps the push near 10 fps; 20x20 PNG encodes in ~1 ms and
+// the push runs at the full 30 fps - and PNG is lossless, which matters:
+// JPEG's 8x8 blocks are 40% of a 20x20 frame each, so its artifacts land
+// directly on LED cells. The app's auto-zoom fits any source size to the
+// grid, so a 20x20 source maps 1:1 with zero pan math.
 let pushing = false;
 const pushCanvas = document.createElement('canvas');
 pushCanvas.width = WALL.grid;
@@ -216,10 +218,10 @@ function pushFrame() {
     }
     fetch('/content/frame', {
       method: 'POST',
-      headers: { 'content-type': 'image/jpeg' },
+      headers: { 'content-type': 'image/png' },
       body: blob,
     }).catch(() => {}).then(() => { pushing = false; });
-  }, 'image/jpeg', 0.85);
+  }, 'image/png');
 }
 
 function draw() {

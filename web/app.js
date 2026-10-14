@@ -733,10 +733,15 @@ function pushContentFrame() {
     }
     fetch('/content/frame', {
       method: 'POST',
-      headers: { 'content-type': 'image/jpeg' },
+      headers: { 'content-type': 'image/png' },
       body: blob,
     }).catch(() => {}).then(() => { cPushing = false; });
-  }, 'image/jpeg', 0.85);
+    // PNG, deliberately: JPEG's 8x8 blocks are 40% of a 20x20 frame each,
+    // so its artifacts land directly on LED cells (an orange square gains
+    // red/green ringing). At 400x400 PNG encoding was the bottleneck and
+    // JPEG won; at 20x20 PNG encodes in ~1 ms and is lossless - pixel art
+    // demands exact colors, and this is nothing but pixel art.
+  }, 'image/png');
 }
 
 // Content control: publish protocol commands to the companion content page
