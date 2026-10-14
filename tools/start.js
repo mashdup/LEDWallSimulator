@@ -136,6 +136,21 @@ function openAppWindow(url) {
     return null;
   }
   const profile = fileURLToPath(new URL('../.wall-profile', import.meta.url));
+  // A second launch with the same profile DELEGATES to the running instance,
+  // and delegated --app opens as a plain tab (verified: clean launch gives a
+  // 39 px title bar - a real app window; delegation gives a tab strip). The
+  // profile is dedicated to this launcher, so any instance carrying it is a
+  // stale one from a previous session: clear it before launching, so every
+  // `npm run wall` is a clean launch and always an app window.
+  if (process.platform === 'win32') {
+    spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
+      "Where-Object CommandLine -like '*wall-profile*' | " +
+      'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'],
+      { stdio: 'ignore', windowsHide: true });
+  } else {
+    spawnSync('pkill', ['-f', 'wall-profile'], { stdio: 'ignore' });
+  }
   const args = [
     `--app=${url}`,
     `--user-data-dir=${profile}`,
