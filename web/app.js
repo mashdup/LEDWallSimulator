@@ -160,9 +160,13 @@ function syncWallOptions() {
       el._layout = o.layout;
       sel.append(el);
     }
+    // Default to the calibrated mounting - the first variant, carrying
+    // LAYOUT_DEFAULTS (stripAxis 'y': strips are columns, top->bottom, not
+    // serpentine) - not identity, which is the 'no wiring mistake' answer
+    // for a sender wired row-major. The wall is wired column-major.
+    sel.selectedIndex = 1;
   }
-  const chosen = sel.selectedIndex;
-  wallLayout = sel.options[chosen]?._layout ?? identity();
+  wallLayout = sel.options[sel.selectedIndex]?._layout ?? identity();
 }
 
 // ---------------------------------------------------------------------------
@@ -259,11 +263,13 @@ function buildPanner() {
  * browser every 500 ms for pixels nobody sees.
  */
 function setSourceMode(mode) {
-  sourceMode = mode === 'page' ? 'page' : 'text';
-  const isPage = sourceMode === 'page';
+  sourceMode = mode === 'content' ? 'content' : mode === 'page' ? 'page' : 'text';
+  const isPage = sourceMode === 'page' || sourceMode === 'content';
 
   $('bannerControls').hidden = isPage;
   $('pageControls').hidden = !isPage;
+
+  if (sourceMode === 'content') applyContentPresets();
 
   if (isPage) {
     banner.stop();
@@ -274,6 +280,32 @@ function setSourceMode(mode) {
     banner.start();
     buildScroller();
   }
+}
+
+/**
+ * The 'content' feed is page mode with the push pipeline's correct
+ * settings applied as a unit - the five fields that took manual tuning
+ * (endpoint, refresh, auto-zoom, speed, URL) are one decision, and one
+ * decision made wrong is a frozen or stuttering wall:
+ *   - endpoint /content/frame: the app tab generates the frames (never
+ *     throttled, holds the audio keep-alive); no capture, no photographer
+ *   - refresh 34 ms: one poll per frame tick
+ *   - auto-zoom on: the pushed frame is 20x20 - the wall's own resolution
+ *   - speed 0: the frame IS the view; panning a 20x20 source is a shake
+ *   - URL: this server's content page, for the state and as a mirror
+ */
+function applyContentPresets() {
+  const url = `${location.origin}/content.html?wall=1`;
+  $('pageUrl').value = url;
+  page.url = url;
+  $('pageEndpoint').value = '/content/frame';
+  page.endpoint = '/content/frame';
+  $('pagePoll').value = 34;
+  page.intervalMs = 34;
+  $('pageAutoZoom').checked = true;
+  $('pageZoom').disabled = true;
+  $('pageSpeed').value = 0;
+  if (renderer instanceof Panner) renderer.cellsPerFrame = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +334,7 @@ function tick() {
     // Rebuilding on a real change is what makes an edited banner.txt or a fresh
     // page capture reach the wall; the marquee restarts because the copy it was
     // scrolling no longer exists.
-    if (sourceMode === 'page') {
+    if (sourceMode === 'page' || sourceMode === 'content') {
       if (renderer === null || renderer.source !== page.bitmap()) buildPanner();
     } else if (renderer === null || renderer.source !== banner.bitmap()) {
       buildScroller();
@@ -419,7 +451,7 @@ function report(k, ma) {
   // The pan advances every frame even when the capture bytes do not change, so
   // the page readout is refreshed alongside the other live telemetry instead of
   // only when a new capture lands.
-  if (sourceMode === 'page' && renderer instanceof Panner) {
+  if ((sourceMode === 'page' || sourceMode === 'content') && renderer instanceof Panner) {
     setOutput($('pageOut'), pageReadout(), page.stale ? 'warn' : 'ok');
   }
 }
