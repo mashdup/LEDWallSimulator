@@ -247,8 +247,13 @@ const content = { rev: 0, at: Date.now(), state: { v: 1, kind: 'demo' } };
 
 function handleContentGet(req, res) {
   // no-store: renderers poll this every ~100 ms; a cached answer is a frozen wall.
+  // `at` is the server's CURRENT time, not the last-POST time: renderers
+  // rebase their clock on every poll (serverAt + elapsed). If at were the
+  // POST time, every poll would snap every animation back to the moment of
+  // the last command - a sawtooth clock, seen as animation that constantly
+  // restarts. The POST time stays in the body as postedAt for reference.
   respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-    JSON.stringify(content));
+    JSON.stringify({...content, at: Date.now()}));
 }
 
 async function handleContentPost(req, res) {

@@ -122,6 +122,16 @@ test('POST /content stores legal commands, rejects junk, bumps rev', async () =>
 
     // no-store: a cached /content is a frozen wall.
     assert.match(a.headers.get('cache-control'), /no-store/);
+
+    // The clock: GET.at is the server's CURRENT time, and must advance
+    // between polls. Renderers rebase their animation clock on every poll;
+    // if at were the last-POST time, every poll would snap every animation
+    // back to the moment of the last command - a sawtooth clock that reads
+    // as animation constantly restarting (the bug this guards).
+    const g1 = await (await fetch(`${serve.base}/content`)).json();
+    await new Promise((r) => setTimeout(r, 300));
+    const g2 = await (await fetch(`${serve.base}/content`)).json();
+    assert.ok(g2.at > g1.at, 'GET.at must advance with real time, not sit at the last POST');
   } finally {
     await serve.stop();
   }
