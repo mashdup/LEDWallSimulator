@@ -41,6 +41,7 @@ import { Banner } from './banner.js';
 import { PageSource } from './page.js';
 import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
 import { createClock } from './worker-clock.js';
+import { startKeepAlive } from './keep-alive.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -427,6 +428,10 @@ function report(k, ma) {
 async function connect() {
   const kind = $('sink').value;
   if (!SINK_KINDS.includes(kind)) return;
+  // The click that connects the wall is also the gesture that lets a silent
+  // audio stream start: Chrome throttles a hidden tab's timers AND its
+  // workers to ~1 Hz, and the audio exemption is the only in-page escape.
+  startKeepAlive();
   try {
     sink = await openSink(kind, {
       baud: Number($('baud').value),

@@ -67,6 +67,7 @@
 
 <script type="module">
 import { createClock } from './worker-clock.js';
+import { startKeepAlive } from './keep-alive.js';
 /*
  * WALL — the drawing API for this page's canvas, sized to the panel.
  *
@@ -131,7 +132,7 @@ function stop() {
   clock = null;
 }
 
-document.getElementById('demo').addEventListener('click', demo);
+document.getElementById('demo').addEventListener('click', () => { startKeepAlive(); demo(); });
 document.getElementById('stop').addEventListener('click', () => { stop(); WALL.clear(); });
 document.getElementById('fill').addEventListener('click', () => { stop(); WALL.rect(0, 0, WALL.grid, WALL.grid, '#fff'); });
 document.getElementById('black').addEventListener('click', () => { stop(); WALL.clear(); });
