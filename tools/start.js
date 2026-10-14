@@ -143,7 +143,12 @@ function openElectronWindow(url) {
     return null;
   }
   const main = fileURLToPath(new URL('./electron/main.cjs', import.meta.url));
-  const proc = spawn(bin, [main, url], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });
+  // NO windowsHide here: it sets STARTF_USESHOWWINDOW/SW_HIDE on the
+  // process, and Electron's browser window HONORS that (measured: with it,
+  // MainWindowHandle stays 0 - the app runs with no window on the desktop;
+  // without it, 'LED Wall' appears). Electron is a GUI binary, so no console
+  // window exists to hide in the first place.
+  const proc = spawn(bin, [main, url], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   proc.unref();
   // The single-instance newcomer touches the shared cache dir before it
   // notices the lock and exits; those errors are its last words, not the

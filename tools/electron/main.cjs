@@ -14,7 +14,7 @@
  *
  * Usage: electron main.cjs <url>
  */
-const { app, BrowserWindow, session, Menu } = require('electron');
+const { app, BrowserWindow, session, Menu, screen: electronScreen } = require('electron');
 const path = require('node:path');
 
 const url = process.argv.find((a) => /^http:\/\//.test(a)) ?? 'http://127.0.0.1:8080/';
@@ -46,9 +46,11 @@ if (!app.requestSingleInstanceLock()) {
     const win = new BrowserWindow({
       width: 1280,
       height: 800,
+      center: true,
       title: 'LED Wall',
       backgroundColor: '#000000',
       autoHideMenuBar: true,
+      show: false, // show() on ready-to-show: no ghost windows, no invisible app
       webPreferences: {
         // The whole point of leaving the browser: the frame loop must never
         // be throttled, and here WE decide that, not a tab policy.
@@ -58,6 +60,15 @@ if (!app.requestSingleInstanceLock()) {
     win.setMenuBarVisibility(false);
     win.loadURL(url);
 
+    win.once('ready-to-show', () => {
+      // A saved off-screen bounds (multi-monitor history in userData) makes
+      // the app 'start with no window'; center explicitly and log the
+      // position so 'no window' is answerable from the launcher output.
+      win.center();
+      win.show();
+      win.focus();
+      console.log(`electron: window at ${JSON.stringify(win.getBounds())} on ${JSON.stringify(electronScreen.getPrimaryDisplay().workArea)}`);
+    });
     win.webContents.on('did-finish-load', () => {
       console.log(`electron: window loaded ${url}`);
       win.webContents
