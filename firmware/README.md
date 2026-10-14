@@ -271,6 +271,13 @@ limit, send a large `limitMa` (24000+ saturates at 255), not zero.
 
 ## Self-test (`-D SELFTEST=1`)
 
+**Calibrated 2026-10-14 (milestone 5, complete).** WALK + INDEX_MAP read off
+the live panel: strips are **columns**, each running **top→bottom**, every
+column restarting at the top (**not serpentine**), advancing **left→right**;
+index 0 top-left, 399 bottom-right. `core/layout.js` now defaults to
+`stripAxis: 'y'`, `snake: false`, no flips — `index = 20·col + row` — and a
+logical top-left "F" streamed through that layout lands upright on the wall.
+
 Milestone 5: layout calibration. Patterns address **physical LED indices** — the
 firmware has no layout map, `core/layout.js` owns that. That is exactly what
 makes them useful: what you see on the wall is the raw physical order, and the

@@ -19,20 +19,20 @@ test('pack produces exactly 1200 bytes', () => {
  * triplet, at the physical index the layout says.
  */
 test('a known pattern lands on the expected physical offsets', () => {
-  const layout = new Layout(); // serpentine, 20 rows of 20
+  const layout = new Layout(); // calibrated: 20 columns of 20, straight
   const p = new Panel();
   p.setPixel(0, 0, 255, 0, 0); // physical 0
-  p.setPixel(19, 0, 0, 255, 0); // physical 19
-  p.setPixel(0, 1, 0, 0, 255); // physical 39 (row 1 is snaked)
-  p.setPixel(19, 1, 1, 2, 3); // physical 20
+  p.setPixel(19, 0, 0, 255, 0); // physical 380 (column 19, top)
+  p.setPixel(0, 1, 0, 0, 255); // physical 1 (column 0 runs top->bottom)
+  p.setPixel(19, 1, 1, 2, 3); // physical 381
 
   const b = pack(p, layout);
   assert.equal(b.length, 1200);
 
   assert.deepEqual([b[0], b[1], b[2]], [255, 0, 0]);
-  assert.deepEqual([b[19 * 3], b[19 * 3 + 1], b[19 * 3 + 2]], [0, 255, 0]);
-  assert.deepEqual([b[39 * 3], b[39 * 3 + 1], b[39 * 3 + 2]], [0, 0, 255]);
-  assert.deepEqual([b[20 * 3], b[20 * 3 + 1], b[20 * 3 + 2]], [1, 2, 3]);
+  assert.deepEqual([b[380 * 3], b[380 * 3 + 1], b[380 * 3 + 2]], [0, 255, 0]);
+  assert.deepEqual([b[1 * 3], b[1 * 3 + 1], b[1 * 3 + 2]], [0, 0, 255]);
+  assert.deepEqual([b[381 * 3], b[381 * 3 + 1], b[381 * 3 + 2]], [1, 2, 3]);
 
   // Nothing else lit: exactly 4 triplets nonzero.
   let lit = 0;
@@ -74,7 +74,7 @@ test('packInto reuses a scratch buffer without allocating', () => {
   p.setPixel(0, 1, 7, 7, 7);
   const out = packInto(p, layout, scratch);
   assert.equal(out, scratch);
-  assert.deepEqual([scratch[39 * 3], scratch[39 * 3 + 1], scratch[39 * 3 + 2]], [7, 7, 7]);
+  assert.deepEqual([scratch[1 * 3], scratch[1 * 3 + 1], scratch[1 * 3 + 2]], [7, 7, 7]);
 });
 
 test('packInto rejects a scratch buffer of the wrong size', () => {
@@ -101,7 +101,7 @@ test('unpack is the exact inverse of pack', () => {
  * rather than being silently corrected.
  */
 test('packing with a wrong layout and unpacking with identity scrambles visibly', () => {
-  const wrong = new Layout({ flipX: true, snake: false });
+  const wrong = new Layout({ stripAxis: 'x', flipX: true, snake: false });
   const p = new Panel();
   p.setPixel(0, 0, 255, 255, 255); // logical top-left
 
@@ -120,9 +120,9 @@ test('unpack validates length', () => {
 test('packScaled applies brightness in physical order without touching the panel', () => {
   const layout = new Layout();
   const p = new Panel();
-  p.setPixel(0, 1, 200, 100, 50); // physical 39
+  p.setPixel(0, 1, 200, 100, 50); // physical 1 (column 0, row 1)
   const b = packScaled(p, layout, 0.5);
-  assert.deepEqual([b[39 * 3], b[39 * 3 + 1], b[39 * 3 + 2]], [100, 50, 25]);
+  assert.deepEqual([b[1 * 3], b[1 * 3 + 1], b[1 * 3 + 2]], [100, 50, 25]);
   assert.deepEqual(p.getPixel(0, 1), [200, 100, 50]);
 });
 
@@ -134,7 +134,7 @@ test('packScaled(1) equals pack', () => {
 });
 
 test('pack handles a mid-row-folding strip layout', () => {
-  const layout = new Layout({ stripLength: 50, snake: true });
+  const layout = new Layout({ stripAxis: 'x', stripLength: 50, snake: true });
   const p = new Panel();
   p.setPixel(0, 2, 9, 9, 9); // physical 40
   p.setPixel(10, 2, 8, 8, 8); // physical 99 (snaked strip 1)

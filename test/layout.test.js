@@ -9,35 +9,34 @@ import { Layout, LAYOUT_DEFAULTS, identity, layoutVariants } from '../core/layou
  * semantics are pinned hard here: strip axis, snake direction, offsets, flips.
  */
 
-test('default layout: 20 rows of 20, serpentine', () => {
+test('default layout: 20 columns of 20, straight (calibrated on the wall)', () => {
   const l = new Layout();
   assert.equal(l.count, 400);
   assert.equal(l.strips, 20);
   assert.equal(l.stripLength, 20);
 
-  // Row 0 runs forwards.
+  // Milestone 5, measured with WALK + INDEX_MAP on the real panel: strips are
+  // columns, each running top->bottom, every column restarting at the top.
+  // Column 0 runs top->bottom.
   assert.equal(l.index(0, 0), 0);
-  assert.equal(l.index(19, 0), 19);
-  // Row 1 is snaked: it starts at 39 and runs backwards.
-  assert.equal(l.index(0, 1), 39);
-  assert.equal(l.index(19, 1), 20);
-  // Row 2 runs forwards again.
-  assert.equal(l.index(0, 2), 40);
-  assert.equal(l.index(19, 2), 59);
-  // Last row.
-  assert.equal(l.index(0, 19), 399);
-  assert.equal(l.index(19, 19), 380);
+  assert.equal(l.index(0, 19), 19);
+  // Column 1 starts at the TOP of the next column: the panel is NOT serpentine.
+  assert.equal(l.index(1, 0), 20);
+  assert.equal(l.index(1, 19), 39);
+  // Last column.
+  assert.equal(l.index(19, 0), 380);
+  assert.equal(l.index(19, 19), 399);
 });
 
-test('snake:false gives a plain row-major raster', () => {
-  const l = new Layout({ snake: false });
+test('snake:false on the x axis gives a plain row-major raster', () => {
+  const l = new Layout({ stripAxis: 'x', snake: false });
   for (let y = 0; y < 20; y++) {
     for (let x = 0; x < 20; x++) assert.equal(l.index(x, y), y * 20 + x);
   }
 });
 
-test('stripAxis:"y" makes a strip a column', () => {
-  const l = new Layout({ stripAxis: 'y' });
+test('stripAxis:"y" with snake makes a strip a column that runs backwards on odd strips', () => {
+  const l = new Layout({ stripAxis: 'y', snake: true });
   assert.equal(l.index(0, 0), 0);
   assert.equal(l.index(0, 19), 19); // column 0, snaked? no: strip 0 is column 0
   assert.equal(l.index(1, 0), 39); // column 1 is strip 1 -> reversed
@@ -48,7 +47,7 @@ test('startOffsets relocate individual strips', () => {
   // A spliced data line where the whole chain is rotated by one strip:
   // strip 0 physically begins at LED 20, and strip 19 wraps to LED 0.
   const offsets = Array.from({ length: 20 }, (_, i) => ((i + 1) % 20) * 20);
-  const l = new Layout({ startOffsets: offsets, snake: false });
+  const l = new Layout({ stripAxis: 'x', startOffsets: offsets, snake: false });
   assert.equal(l.index(0, 0), 20);
   assert.equal(l.index(19, 0), 39);
   assert.equal(l.index(0, 1), 40);
@@ -87,7 +86,7 @@ test('flips compose with snake without breaking the permutation', () => {
 });
 
 test('transpose maps a rotated grid', () => {
-  const l = new Layout({ transpose: true, snake: false });
+  const l = new Layout({ stripAxis: 'x', transpose: true, snake: false });
   // transpose swaps the wiring coordinates, so the raster becomes column-major:
   // cell (x,y) lands on physical x*cols + y.
   assert.equal(l.index(3, 7), 3 * 20 + 7);
@@ -112,7 +111,7 @@ test('stripLength must divide the pixel count', () => {
 test('a strip may fold mid-row, which is what a spliced curtain does', () => {
   // 50-LED strips on a 20-wide grid: strip 0 covers rows 0-1 plus 10 cells of
   // row 2. Serpentine folds alternate, and the map is still a permutation.
-  const l = new Layout({ stripLength: 50, snake: true });
+  const l = new Layout({ stripAxis: 'x', stripLength: 50, snake: true });
   assert.equal(l.strips, 8);
   assert.equal(l.index(0, 0), 0);
   assert.equal(l.index(19, 1), 39);
@@ -154,10 +153,10 @@ test('index() clips out-of-range coordinates to -1', () => {
 
 test('with() is immutable and returns a new Layout', () => {
   const a = new Layout();
-  const b = a.with({ snake: false });
+  const b = a.with({ snake: true });
   assert.notEqual(a, b);
-  assert.equal(a.snake, true);
-  assert.equal(b.snake, false);
+  assert.equal(a.snake, false);
+  assert.equal(b.snake, true);
   assert.equal(b.stripLength, a.stripLength);
   assert.equal(b.cols, a.cols);
 });
@@ -183,13 +182,13 @@ test('LAYOUT_DEFAULTS describes a 20x20 panel', () => {
   assert.equal(LAYOUT_DEFAULTS.cols, 20);
   assert.equal(LAYOUT_DEFAULTS.rows, 20);
   assert.equal(LAYOUT_DEFAULTS.stripLength, 20);
-  assert.equal(LAYOUT_DEFAULTS.stripAxis, 'x');
+  assert.equal(LAYOUT_DEFAULTS.stripAxis, 'y');
 });
 
 test('describe() and preview() are usable during calibration', () => {
   const l = new Layout();
-  assert.match(l.describe(), /20x20 rows of 20/);
-  assert.match(l.describe(), /snake/);
+  assert.match(l.describe(), /20x20 columns of 20/);
+  assert.match(l.describe(), /straight/);
   const lines = l.preview().split('\n');
   assert.equal(lines.length, 20);
   assert.equal(lines[0].trim().split(/\s+/).length, 20);

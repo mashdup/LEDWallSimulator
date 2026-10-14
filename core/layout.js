@@ -23,12 +23,16 @@ export const LAYOUT_DEFAULTS = {
   cols: DEFAULT_COLS,
   rows: DEFAULT_ROWS,
   /** Axis a strip travels along. 'x': a strip is one row of `stripLength` cells. */
-  stripAxis: 'x',
+  // Calibrated against the real panel (milestone 5, WALK + INDEX_MAP on the
+  // wall): strips are columns, each running top->bottom, next strip restarting
+  // at the top of the next column left->right. index = 20*col + row.
+  stripAxis: 'y',
   stripLength: DEFAULT_COLS,
   /** Optional per-strip physical start offset. null => stripLength * stripIndex. */
   startOffsets: null,
-  /** Alternate strips run backwards (serpentine wiring). */
-  snake: true,
+  /** Alternate strips run backwards (serpentine wiring). Measured: this panel
+   *  is NOT serpentine — every column starts at the top. */
+  snake: false,
   flipX: false,
   flipY: false,
   /** Grid is wired rotated 90 degrees. Requires a square grid. */
@@ -194,7 +198,9 @@ export class Layout {
     for (let y = 0; y < rows; y++) {
       const row = [];
       for (let x = 0; x < cols; x++) row.push(String(this.map[y * cols + x]).padStart(3, ' '));
-      lines.push(row.join(''));
+      // Joined with a space: padStart(3) alone cannot separate two adjacent
+      // 3-digit indices, which the column layout's first row (0,20,...,380) hits.
+      lines.push(row.join(' '));
     }
     return lines.join('\n');
   }
@@ -212,7 +218,9 @@ function invertMap(map, count) {
  * unpack with identity, and any wiring mistake shows up as scrambled text.
  */
 export function identity(cols = DEFAULT_COLS, rows = DEFAULT_ROWS) {
-  return new Layout({ cols, rows, stripLength: cols, snake: false, flipX: false, flipY: false });
+  // stripAxis is pinned, not defaulted: identity means physical == logical,
+  // row-major, whatever the panel's calibrated mounting default is.
+  return new Layout({ cols, rows, stripAxis: 'x', stripLength: cols, snake: false, flipX: false, flipY: false });
 }
 
 /**

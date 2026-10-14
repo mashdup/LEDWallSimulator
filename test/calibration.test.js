@@ -464,19 +464,20 @@ test('index-map on the identity layout colours cell (x,y) as row y, column x', (
 });
 
 /**
- * The serpentine default is the interesting case: row 1 runs backwards, so the
- * colour ramp reverses along it. Reading R off the wall tells you which strip
- * you are on; reading G tells you where along the strip.
+ * The calibrated default is the interesting case: strips are columns running
+ * top->bottom, so the G ramp runs down each column and the R ramp steps across
+ * the columns. Reading R off the wall tells you which column you are on;
+ * reading G tells you how far down it.
  */
-test('index-map on the default serpentine layout reverses row 1', () => {
+test('index-map on the calibrated column layout ramps down each column', () => {
   const layout = new Layout();
   const panel = calibrationPattern('index-map', new Panel(layout.cols, layout.rows), layout, 0);
 
-  assert.equal(layout.index(19, 1), 20, 'the serpentine layout must run row 1 backwards from physical 20');
-  assert.deepEqual(panel.getPixel(19, 1), [20 + 12 * 1, 20 + 12 * 0, 30], 'cell (19,1) holds physical 20');
+  assert.equal(layout.index(19, 1), 381, 'the calibrated layout puts (19,1) at physical 381');
+  assert.deepEqual(panel.getPixel(19, 1), [20 + 12 * 19, 20 + 12 * 1, 30], 'cell (19,1) holds physical 381');
 
-  assert.equal(layout.index(0, 1), 39, 'the serpentine layout must end row 1 at physical 39');
-  assert.deepEqual(panel.getPixel(0, 1), [20 + 12 * 1, 20 + 12 * 19, 30], 'cell (0,1) holds physical 39');
+  assert.equal(layout.index(0, 1), 1, 'column 0 runs top->bottom, so (0,1) is physical 1');
+  assert.deepEqual(panel.getPixel(0, 1), [20 + 12 * 0, 20 + 12 * 1, 30], 'cell (0,1) holds physical 1');
 });
 
 /**

@@ -388,7 +388,7 @@ test('--layout accepts the flag names core/layout.js defines and rejects the res
 });
 
 test('the preview shows the wall through the layout being calibrated', () => {
-  const layout = new Layout(); // default serpentine: row 1 runs backwards
+  const layout = new Layout(); // calibrated: columns of 20, straight, top->bottom
   const wall = brightWall();
   const white = new Uint8Array(RGB_BYTES);
   white[0] = 255; // physical LED 0 only
@@ -406,11 +406,12 @@ test('the preview shows the wall through the layout being calibrated', () => {
   assert.equal(lit.length, 1, 'exactly one cell is lit');
   assert.deepEqual(lit[0], { y: 0, x: 0 });
 
-  // The serpentine's actual signature: the strip turns around at the RIGHT edge.
-  // Physical 19 is the last LED of strip 0, so it sits at the end of row 0; physical
-  // 20 is the first LED of strip 1, and because strip 1 runs backwards it sits at the
-  // end of row 1 too. A straight run would put it at the START of row 1 instead —
-  // which is the exact question a calibration pass answers by looking at the wall.
+  // The calibrated wiring's actual signature: strips are COLUMNS. Physical 19
+  // is the last LED of strip 0, so it sits at the BOTTOM of column 0; physical
+  // 20 is the first LED of strip 1, and because the panel is not serpentine it
+  // sits at the TOP of column 1. A row-major raster would put 19 at the END of
+  // row 0 and 20 at the START of row 1 — which is the exact question a
+  // calibration pass answers by looking at the wall.
   const wall2 = brightWall();
   const other = new Uint8Array(RGB_BYTES);
   other[19 * 3] = 255;
@@ -418,14 +419,15 @@ test('the preview shows the wall through the layout being calibrated', () => {
   wall2.push(frame(0, other));
   wall2.run(20);
 
-  const serpentine = asciiPreview(wall2.strip, layout).split('\n');
-  assert.equal([...serpentine[0]].findIndex((ch) => ch !== '.'), 19, 'physical 19 ends row 0');
-  assert.equal([...serpentine[1]].findIndex((ch) => ch !== '.'), 19, 'physical 20 ends row 1: the strip snakes down the right edge');
+  const calibrated = asciiPreview(wall2.strip, layout).split('\n');
+  const litX = (rows, y) => [...rows[y]].findIndex((ch) => ch !== '.');
+  assert.equal(litX(calibrated, 19), 0, 'physical 19 ends column 0, at the bottom');
+  assert.equal(litX(calibrated, 0), 1, 'physical 20 starts column 1, at the top: the panel is straight, not serpentine');
 
   const straight = asciiPreview(wall2.strip, identity()).split('\n');
-  assert.equal([...straight[0]].findIndex((ch) => ch !== '.'), 19, 'identity agrees here');
-  assert.equal([...straight[1]].findIndex((ch) => ch !== '.'), 0, 'identity puts physical 20 at the START of row 1');
-  assert.notEqual(serpentine[1], straight[1], 'the preview must depend on the layout being calibrated');
+  assert.equal(litX(straight, 0), 19, 'identity puts physical 19 at the END of row 0');
+  assert.equal(litX(straight, 1), 0, 'identity puts physical 20 at the START of row 1');
+  assert.notEqual(calibrated[19], straight[19], 'the preview must depend on the layout being calibrated');
 });
 
 test('pageSource puts a live web page on the wall, headless', async (t) => {
