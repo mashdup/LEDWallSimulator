@@ -95,22 +95,29 @@ if (!app.requestSingleInstanceLock()) {
     });
     ses.on('select-serial-port', (event, portList, _wc, callback) => {
       const ports = Array.from(portList);
-      // The show machine's ESP32 is the wch.cn USB-UART: usbProductId
-      // 0x1a86, product 'USB Serial', vendor 'wch.cn' - and the COM number
-      // is a per-machine detail, so match the DEVICE, not 'COM8'. A blind
-      // ports[0] fallback connected to unrelated COM devices (Bluetooth,
-      // audio) when the panel was unplugged: open() succeeds, writes go
-      // into a void, and the UI says 'Connected' over a dead wall.
+      // Electron's SerialPortInfo fields came back undefined in the field
+      // (log showed 'undefined[?]' x3 while the OS clearly had COM8), so the
+      // raw objects are dumped once per request and matched defensively:
+      // any string-typed field that smells like the wch UART wins.
+      const describe = (p) => {
+        const s = JSON.stringify(p) ?? String(p);
+        return s.length > 200 ? `${s.slice(0, 200)}...` : s;
+      };
+      const fields = (p) => `${p.portName ?? ''} ${p.displayName ?? ''} ${p.deviceInstanceId ?? ''}`;
       const isWall = (p) =>
-        /wch|ch34|usb serial/i.test(p.usbProductName ?? '') ||
-        p.usbVendorId === 0x1a86 ||
-        p.usbProductId === 0x7523 ||
-        /com8\b/i.test(p.path);
-      const chosen = ports.find(isWall) ?? ports.find((p) => /^com\d+$/i.test(p.path)) ?? null;
+        /wch|ch34|usb.?serial/i.test(fields(p)) ||
+        String(p.vendorId ?? '').toLowerCase() === '1a86' ||
+        String(p.productId ?? '').toLowerCase() === '7523' ||
+        /vid_1a86/i.test(p.deviceInstanceId ?? '') ||
+        /com8\b/i.test(fields(p));
+      const chosen =
+        ports.find(isWall) ??
+        ports.find((p) => /^com\d+$/i.test(String(p.portName ?? ''))) ??
+        null;
       console.log(
         `electron: serial request - ${ports.length} port(s): ` +
-        ports.map((p) => `${p.path}[${p.usbProductName ?? p.usbVendorId?.toString(16) ?? '?'}]`).join(', ') +
-        (chosen ? ` -> choosing ${chosen.path}` : ' -> none chosen (refused)')
+        ports.map(describe).join(' | ') +
+        (chosen ? ` -> choosing ${describe(chosen)}` : ' -> none chosen (refused)')
       );
       callback(chosen ? chosen.portId : '');
       event.preventDefault();
