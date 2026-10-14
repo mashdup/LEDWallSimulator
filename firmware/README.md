@@ -269,6 +269,24 @@ limit, send a large `limitMa` (24000+ saturates at 255), not zero.
 
 ---
 
+## Power envelope (measured on the wall, 2026-10-14)
+
+The panel's built-in ribbon — not the supply — is the current ceiling. Probe
+experiment: the last column alone at full white is *very bright* (1.2 A
+reaches the far corner with voltage to spare), so the path is healthy; the
+limit is cumulative I·R loss. Lighting white columns progressively, the
+far-column probe dims at **5 columns ≈ 6–7 A total**, and the full-white
+ramp knee sits near 42% ink (≈10 A average demand). Full white is 24 A at
+20 mA/channel and is unreachable: br above ~100 buys heat, not light.
+
+Supplies tried: 20 A and 40 A — **no difference**, which is what identifies
+the ribbon as the constraint. The ribbon ran cold to the touch, and the
+page's 8000 mA default keeps the estimator's margin just above the collapse
+zone, so it stays the default. If brightness ever needs to grow, the move
+is a second power pair to the far corner (additive, same bus): the probe
+proves the far end takes full voltage at low current, so dual injection
+should roughly double the envelope.
+
 ## Self-test (`-D SELFTEST=1`)
 
 **Calibrated 2026-10-14 (milestone 5, complete).** WALK + INDEX_MAP read off
