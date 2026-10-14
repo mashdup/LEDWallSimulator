@@ -496,7 +496,14 @@ async function connect() {
     // A fresh sink has been given nothing, so the next tick must push even if the
     // image is not changing; otherwise connecting to a still wall shows nothing.
     lastSent = null;
-    setOutput($('sinkOut'), `connected: ${sink.kind}`, 'ok');
+    // Name what we connected to: a programmatic port picker can choose an
+    // unrelated COM device, and 'connected: serial' over a dead wall is a
+    // trap. The path and product name make a wrong choice visible.
+    const info = sink.port?.getInfo?.();
+    const whom = info
+      ? `${info.path ?? 'port'}${info.usbProductName ? ` (${info.usbProductName})` : ''}`
+      : '';
+    setOutput($('sinkOut'), `connected: ${sink.kind}${whom ? ` - ${whom}` : ''}`, 'ok');
     $('connect').disabled = true;
     $('disconnect').disabled = false;
   } catch (err) {

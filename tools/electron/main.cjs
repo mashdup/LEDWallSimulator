@@ -95,15 +95,24 @@ if (!app.requestSingleInstanceLock()) {
     });
     ses.on('select-serial-port', (event, portList, _wc, callback) => {
       const ports = Array.from(portList);
-      const preferred =
-        ports.find((p) => /com8\b/i.test(p.path)) ??
-        ports.find((p) => /^com\d+$/i.test(p.path)) ??
-        ports[0];
-      if (preferred) {
-        callback(preferred.portId);
-      } else {
-        callback(''); // no ports: refuse the request cleanly
-      }
+      // The show machine's ESP32 is the wch.cn USB-UART: usbProductId
+      // 0x1a86, product 'USB Serial', vendor 'wch.cn' - and the COM number
+      // is a per-machine detail, so match the DEVICE, not 'COM8'. A blind
+      // ports[0] fallback connected to unrelated COM devices (Bluetooth,
+      // audio) when the panel was unplugged: open() succeeds, writes go
+      // into a void, and the UI says 'Connected' over a dead wall.
+      const isWall = (p) =>
+        /wch|ch34|usb serial/i.test(p.usbProductName ?? '') ||
+        p.usbVendorId === 0x1a86 ||
+        p.usbProductId === 0x7523 ||
+        /com8\b/i.test(p.path);
+      const chosen = ports.find(isWall) ?? ports.find((p) => /^com\d+$/i.test(p.path)) ?? null;
+      console.log(
+        `electron: serial request - ${ports.length} port(s): ` +
+        ports.map((p) => `${p.path}[${p.usbProductName ?? p.usbVendorId?.toString(16) ?? '?'}]`).join(', ') +
+        (chosen ? ` -> choosing ${chosen.path}` : ' -> none chosen (refused)')
+      );
+      callback(chosen ? chosen.portId : '');
       event.preventDefault();
     });
 
