@@ -53,8 +53,9 @@
     Script API on <code>window.WALL</code>: <code>set(x,y,css)</code>,
     <code>rect(x,y,w,h,css)</code>, <code>clear()</code>,
     <code>grid</code> (20), <code>cell</code> (20 px),
-    <code>canvas</code>, <code>ctx</code>. Draw from a
-    <code>requestAnimationFrame</code> loop and the wall follows.
+    <code>canvas</code>, <code>ctx</code>. Drive it from
+    <code>createClock(33).start()</code> (a worker clock — hidden tabs freeze
+    <code>requestAnimationFrame</code>) and the wall follows.
   </p>
   <p>
     <button id="demo">demo animation</button>
@@ -64,7 +65,8 @@
   </p>
 </div>
 
-<script>
+<script type="module">
+import { createClock } from './worker-clock.js';
 /*
  * WALL — the drawing API for this page's canvas, sized to the panel.
  *
@@ -99,14 +101,18 @@ const WALL = (() => {
 window.WALL = WALL;
 
 // ---- demo: proves the loop end-to-end (canvas -> capture -> wall) ----------
+// The tempo lives in a worker, not requestAnimationFrame: a hidden tab's rAF
+// stops entirely, which would freeze the wall's view of this page the moment
+// the tab loses focus. Worker ticks keep the animation running at full rate.
 
-let raf = null;
+let clock = null;
 
 function demo() {
   stop();
   const t0 = performance.now();
-  const frame = (now) => {
-    const s = (now - t0) / 1000;
+  clock = createClock(33).start(); // ~30 fps
+  clock.onTick = () => {
+    const s = (performance.now() - t0) / 1000;
     WALL.clear();
 
     // A bouncing block, fractional position: the wall glides, not jumps.
@@ -117,15 +123,12 @@ function demo() {
     // A seconds bar along the bottom row: slow, readable, unmistakably live.
     const secs = Math.floor(s) % WALL.grid;
     for (let x = 0; x <= secs; x++) WALL.set(x, WALL.grid - 1, '#00ff66');
-
-    raf = requestAnimationFrame(frame);
   };
-  raf = requestAnimationFrame(frame);
 }
 
 function stop() {
-  if (raf !== null) cancelAnimationFrame(raf);
-  raf = null;
+  if (clock !== null) clock.terminate();
+  clock = null;
 }
 
 document.getElementById('demo').addEventListener('click', demo);

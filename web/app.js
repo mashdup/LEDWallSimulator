@@ -40,6 +40,7 @@ import { Sim } from './sim.js';
 import { Banner } from './banner.js';
 import { PageSource } from './page.js';
 import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
+import { createClock } from './worker-clock.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -628,19 +629,24 @@ buildScroller();
 banner.refresh().catch((err) => setOutput($('bannerText'), `banner: ${err.message}`, 'err'));
 
 /**
- * Fixed 30 fps on a timer, not requestAnimationFrame.
+ * Fixed 30 fps on a WORKER clock, not requestAnimationFrame and not a main-
+ * thread timer.
  *
  * The wall's frame rate is a property of the wire (921600 gives ~75 frames/s
- * theoretical), not of the display. rAF is also throttled to ~1 fps in a hidden
- * tab, which would starve the sink and let the firmware watchdog fade the panel
- * the moment this page stops being the front tab — the opposite of a wall driver.
- * A timer keeps the stream alive; only the canvas work is skipped while hidden.
+ * theoretical), not of the display. rAF is throttled to ~1 fps in a hidden
+ * tab, and Chromium throttles plain timers in a hidden tab to ~1 Hz as well
+ * - either way the stream starves the moment this tab stops being the front
+ * tab, and the firmware watchdog fades the panel. Workers are exempt from
+ * background throttling, so the tempo lives in one: the stream keeps full
+ * pace with the tab in the background, and only the canvas work is skipped
+ * while hidden.
  */
 const TARGET_FPS = 30;
 const FRAME_MS = 1000 / TARGET_FPS;
 let next = performance.now();
 
-function loop() {
+const clock = createClock(FRAME_MS);
+clock.onTick = () => {
   const now = performance.now();
   if (now - next >= -1) {
     // Never let the schedule drift behind the clock: a throttled or suspended
@@ -649,14 +655,17 @@ function loop() {
     try {
       tick();
     } catch (err) {
-      // The setTimeout below is the only thing keeping the stream alive, so a
-      // throw escaping tick() would cost the wall every frame after it, not
-      // just the broken one. Report which frame failed and keep going: a bad
+      // The clock is the only thing keeping the stream alive, so a throw
+      // escaping tick() would cost the wall every frame after it, not just
+      // the broken one. Report which frame failed and keep going: a bad
       // layout or a source that changed mid-frame is a recoverable state, and
       // a wall that goes dark permanently is not.
       setOutput($('frameOut'), `frame failed: ${err.message}`, 'err');
     }
   }
-  setTimeout(loop, Math.max(0, next - performance.now()));
-}
-loop();
+};
+// Paint the first frame now, not one clock period from now: the old loop ran
+// tick() synchronously at module load, and a page that renders its first
+// frame ~33 ms late is a page whose readout is empty when a snapshot lands.
+clock.onTick();
+clock.start();
