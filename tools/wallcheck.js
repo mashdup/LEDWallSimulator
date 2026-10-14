@@ -3,12 +3,12 @@
 // The device's own counters are the only thing that can tell "the bytes arrived"
 // from "the bytes were lost", and reading them naively lies in two ways:
 //
-//  1. The CH9102F asserts DTR/RTS when the port is opened and this board's
-//     auto-reset circuit is wired to it, so opening the port reboots the ESP32.
-//     Read the counters in a different connection from the one that streamed and
-//     you will always see a freshly-booted zero. That is exactly what made the
-//     first `bridge.js` runs look like frames=0 while the wall was fine, and it is
-//     why this tool opens once and keeps that one handle for the whole run.
+//  1. DTR/RTS toggling on this board's auto-reset circuit reboots the ESP32, so the
+//     counters do not survive a close and reopen — a second run always opens onto a
+//     freshly-booted zero. Read them in a different connection from the one that
+//     streamed and the answer is always 0, which is exactly what made the first
+//     `bridge.js` runs look like frames=0 while the wall was fine, and why this
+//     tool holds one handle for the whole run.
 //  2. A still wall is not re-sent frame by frame — both drivers skip an unchanged
 //     image, so a static pattern measures almost nothing. This streams a moving
 //     gradient, where every frame is a real frame on the wire.
@@ -121,7 +121,14 @@ export function judge({ sent, before, after, fault = false }) {
     if (delta.discarded) reasons.push(`${delta.discarded} record(s) discarded`);
     if (delta.resyncs) reasons.push(`${delta.resyncs} resync(s) — bytes are being lost somewhere before the decoder`);
     if (delta.rewinds) reasons.push(`${delta.rewinds} rescan(s)`);
-    if (delta.seqGaps) reasons.push(`${delta.seqGaps} sequence gap(s)`);
+    // One gap is the stream restart, not a fault. The sink tracks the last sequence
+    // it saw so it can report a dropped frame, but it does not print that number
+    // back, so a fresh run cannot continue it — and this tool always starts at 0.
+    // A whole frame lost in transport shows up in `frames` as well, which is the
+    // direct measurement, so gaps only mean something past that one restart.
+    if (delta.seqGaps > 1) {
+      reasons.push(`${delta.seqGaps} sequence gaps — more than the single restart gap a fresh run always shows`);
+    }
   }
 
   return { ok: reasons.length === 0, reasons, delta, lost };
@@ -184,8 +191,10 @@ export async function main(argv) {
     });
     console.log(`wallcheck: ${opts.port} @ ${opts.baud}`);
 
-    // Opening the port reboots this board, so the first status line is the sink
-    // announcing itself after boot, not a reading we can use.
+    // The first status line proves the sink is alive and gives the baseline. Every
+    // number in the verdict is a delta, so it does not matter whether this board
+    // just booted or has been running for an hour — except for the sequence, which
+    // judge() accounts for.
     await until(() => seen.latest !== null, BOOT_TIMEOUT_MS, 'the device printed no status line');
     if (seen.boot) console.log(`  ${seen.boot}`);
 
@@ -228,7 +237,8 @@ export async function main(argv) {
     }
 
     if (verdict.ok) {
-      console.log(`  PASS — ${verdict.delta.frames}/${sent} frames decoded${opts.fault ? ', fault discarded and recovered' : ', no bytes lost'}`);
+      const restart = verdict.delta.seqGaps === 1 ? ', one restart gap' : '';
+      console.log(`  PASS — ${verdict.delta.frames}/${sent} frames decoded${opts.fault ? ', fault discarded and recovered' : ', no bytes lost'}${restart}`);
       return 0;
     }
     console.log('  FAIL');

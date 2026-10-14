@@ -80,6 +80,24 @@ test('a transport that loses bytes fails even when every frame that arrived was 
   assert.ok(verdict.reasons.some((r) => r.includes('discarded')), verdict.reasons.join('; '));
 });
 
+test('a single sequence gap is the stream restart, but more than one is a fault', () => {
+  // The sink remembers the last sequence it saw so it can report a dropped frame,
+  // but it does not print that number back, so a fresh run cannot continue it —
+  // this tool always starts at 0. On a board that has already been streamed to,
+  // the first frame of every run is therefore one gap. Measured on the wall: a
+  // 300-frame clean run reports exactly seqGaps=+1, and failing on it would fail
+  // every healthy run.
+  const restart = judge({ sent: 300, before: status(), after: status({ frames: 300, seqGaps: 1 }) });
+  assert.equal(restart.ok, true, restart.reasons.join('; '));
+  assert.equal(restart.delta.seqGaps, 1);
+
+  // Past the restart, a gap means the host skipped frames or whole frames were
+  // lost, and it is no longer explainable.
+  const skipped = judge({ sent: 300, before: status(), after: status({ frames: 300, seqGaps: 2 }) });
+  assert.equal(skipped.ok, false);
+  assert.ok(skipped.reasons.some((r) => r.includes('sequence gap')), skipped.reasons.join('; '));
+});
+
 test('a discarded record fails a clean run even when nothing was resynced', () => {
   // A malformed record reached the decoder. On a healthy transport that cannot
   // happen at all, so it is a failure on its own — resync counts are a separate

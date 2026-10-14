@@ -88,11 +88,41 @@ build on COM6.
 
 ## Verify
 
-Serial records are the same ones the sketch speaks, so the existing tools work:
+The one-command check is `tools/wallcheck.js`. It streams a moving pattern and reads
+the sink's own counters back **in the same connection**, which is the point: the
+counters do not survive a close and reopen (DTR/RTS toggling resets this board), and
+so does it, so a reading taken from anywhere else is always a freshly-booted zero.
 
 ```sh
-node tools/bridge.js --port COM6 --cycle           # four calibration patterns
-node tools/bridge.js --port COM5 --cycle           # UART build
+node tools/wallcheck.js --port COM8           # expect PASS, 300/300, no bytes lost
+node tools/wallcheck.js --port COM8 --fault   # expect PASS, fault discarded and recovered
+```
+
+Measured on this board — the UART build, radio off:
+
+```
+$ node tools/wallcheck.js --port COM8
+  device frames=300 meta=1 disc=0 resync=0 rewind=0 gaps=0 br=255/255 state=live
+  delta  frames=+300 meta=+1 disc=+0 resync=+0 rewind=+0 gaps=+0
+  PASS — 300/300 frames decoded, no bytes lost
+
+$ node tools/wallcheck.js --port COM8 --fault
+  device frames=300 meta=1 disc=1 resync=1 rewind=1 gaps=1 br=255/255 state=live
+  delta  frames=+300 meta=+1 disc=+1 resync=+1 rewind=+1 gaps=+1
+  PASS — 300/300 frames decoded, fault discarded and recovered, one restart gap
+```
+
+Exit status is the verdict: 0 healthy, 1 frames lost, 2 the run never reached the
+device. `--fault` is the sharpest test the protocol has — a frame one payload byte
+short must be discarded *and* have the frame after it recovered by the rescan, which
+is the whole difference from Adalight. A run that starts on a board which has already
+been streamed to reports exactly one sequence gap; that is the restart, not a fault,
+because the sink does not print its last sequence back for a new stream to continue.
+
+`bridge.js` drives the same records, for the calibration patterns:
+
+```sh
+node tools/bridge.js --port COM8 --cycle           # four calibration patterns
 ```
 
 or open the app (`node tools/serve.js`), set **Sink → `serial`**, and Connect.
