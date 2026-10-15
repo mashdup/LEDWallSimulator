@@ -98,15 +98,15 @@
     </fieldset>
 
     <fieldset id="contentControls">
-      <legend>Content control (companion page)</legend>
-      <label>Text <input id="contentText" size="28" placeholder="scroll this on content.html" spellcheck="false"></label>
+      <legend>Content — the wall's show (server state)</legend>
+      <label>Text <input id="contentText" size="28" placeholder="scroll this on the wall" spellcheck="false"></label>
       <label>Color <input id="contentColor" size="9" value="#ffffff"></label>
       <div class="row">
         <button id="contentSend" type="button">Send text</button>
         <button id="contentFill" type="button">Fill</button>
         <button id="contentClear" type="button">Clear</button>
-        <button id="contentDemo" type="button">Demo</button>
       </div>
+      <div class="row" id="contentAnims"></div>
       <output id="contentOut" class="mono"></output>
     </fieldset>
 
@@ -133,8 +133,8 @@
       <label>Strip length <input id="stripLength" type="number" min="1" max="400" step="1" value="20"></label>
       <label>Strip axis
         <select id="stripAxis">
+          <option value="y" selected>y — a strip is a column (this wall)</option>
           <option value="x">x — a strip is a row</option>
-          <option value="y">y — a strip is a column</option>
         </select>
       </label>
       <label>Wall wiring (measured)

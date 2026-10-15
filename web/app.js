@@ -42,7 +42,7 @@ import { PageSource } from './page.js';
 import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
-import { CONTENT_CHANNEL, makeMessage } from '../core/content-protocol.js';
+import { ANIM_NAMES, makeMessage } from '../core/content-protocol.js';
 import { animFrame } from '../core/animations.js';
 
 const $ = (id) => document.getElementById(id);
@@ -140,7 +140,7 @@ function applyLayout() {
     setOutput($('layoutOut'), `layout rejected: ${err.message}`, 'err');
     return;
   }
-  setOutput($('layoutOut'), `${layout.describe()}\n${layout.preview()}`);
+  setOutput($('layoutOut'), layout.describe());
   syncWallOptions();
 }
 
@@ -705,6 +705,9 @@ async function pollContent() {
         });
         cPassMs = cScroller.passDurationMs(30);
       }
+      // The control surface mirrors the server on the SAME poll that drives
+      // the frames - no second fetch loop, no second clock.
+      mirrorContent(j);
     }
   } catch {
     // Server unreachable: keep the last state; the wall holds its frame.
@@ -751,30 +754,23 @@ function pushContentFrame() {
   }, 'image/png');
 }
 
-// Content control: publish protocol commands to the companion content page
-// over BroadcastChannel. The channel is fire-and-forget; the content page's
-// status line is the acknowledgement, and parseMessage there is the gate -
-// makeMessage here throws on an illegal payload, so a broken command is a
-// visible console error at the sender, never a silent half-action.
-// BroadcastChannel needs a real origin: a file:// page has an opaque one and
-// the constructor throws. Say so on the page instead of failing silently -
-// a file:// app tab and an http content tab are different channel worlds,
-// and "the buttons do nothing" is otherwise invisible.
-const contentChannel = (() => {
+// Content controls: the server is the single source of truth for content
+// state. The wall's pipeline spans disconnected browser worlds - this app
+// window, content tabs, control pages, the capture browser - which share no
+// tabs and no BroadcastChannel; only GET/POST /content reaches all of them.
+// Commands are validated by makeMessage here and parseMessage at the server,
+// and the status line mirrors the server's state: the ack IS the state.
+async function sendContent(m, label) {
   try {
-    return new BroadcastChannel(CONTENT_CHANNEL);
-  } catch {
-    setOutput($('contentOut'), 'no channel: open this page from http://127.0.0.1:8080/', 'err');
-    return null;
-  }
-})();
-
-function sendContent(m, label) {
-  if (contentChannel === null) return;
-  try {
-    contentChannel.postMessage(m);
-    setOutput($('contentOut'), `sent: ${label}`);
+    const r = await fetch('/content', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(m),
+      cache: 'no-store',
+    });
+    setOutput($('contentOut'), r.ok ? `sent: ${label}` : `send FAILED: HTTP ${r.status}`, r.ok ? 'ok' : 'err');
   } catch (err) {
+    // file:// has no server to POST to; the served app always does.
     setOutput($('contentOut'), err.message, 'err');
   }
 }
@@ -784,15 +780,40 @@ $('contentSend').addEventListener('click', () => {
   if (text === '') return;
   sendContent(makeMessage('text', {text, color: $('contentColor').value}), `text ${text.slice(0, 24)}`);
 });
+$('contentText').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('contentSend').click();
+});
 $('contentFill').addEventListener('click', () => {
   sendContent(makeMessage('fill', {color: $('contentColor').value}), 'fill');
 });
 $('contentClear').addEventListener('click', () => {
   sendContent(makeMessage('clear'), 'clear');
 });
-$('contentDemo').addEventListener('click', () => {
-  sendContent(makeMessage('anim', {name: 'demo'}), 'demo');
-});
+
+// Animation gallery: one button per library animation. Animations are pure
+// functions of the server clock, so every renderer computes the identical
+// frame at the same second; the button only changes server state.
+for (const name of ANIM_NAMES) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = name;
+  b.dataset.anim = name;
+  b.addEventListener('click', () => sendContent(makeMessage('anim', {name}), `anim ${name}`));
+  $('contentAnims').append(b);
+}
+
+// Mirror the server's current state into the status line and light the
+// matching animation button, so the panel shows what the wall shows.
+function mirrorContent(j) {
+  const s = j.state;
+  const what = s.kind === 'text' ? `text: ${String(s.text).slice(0, 32)}`
+    : s.kind === 'anim' ? s.name
+    : s.kind;
+  setOutput($('contentOut'), `server rev ${j.rev} - showing: ${what}`);
+  for (const b of $('contentAnims').children) {
+    b.classList.toggle('on', s.kind === 'anim' && b.dataset.anim === s.name);
+  }
+}
 
 
 $('limitMa').addEventListener('change', () => {
