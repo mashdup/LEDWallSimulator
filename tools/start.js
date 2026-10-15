@@ -66,6 +66,7 @@ function usage() {
   console.error('usage: npm start [-- --port <port>] [--no-browser]');
   console.error('       npm run wall  (standalone app window, show mode)');
   console.error('       node tools/start.js [--port 8090] [--no-browser] [--app]');
+  console.error('       npm run wall -- --debug  (app with DevTools on 127.0.0.1:9223)');
 }
 
 /** Same flag/env precedence as serve.js: --port > PORT > 8080. */
@@ -74,6 +75,7 @@ function parseArgs(argv) {
   let browser = true;
   let app = false;
   let electron = false;
+  let debug = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -93,6 +95,12 @@ function parseArgs(argv) {
       app = true;
     } else if (arg === '--electron') {
       electron = true;
+    } else if (arg === '--debug') {
+      // Opens Electron's DevTools protocol on 127.0.0.1:9223 so the app
+      // page's state (fps, sink status, frame seq) can be read from
+      // outside - the difference between 'connect failed' and 'connected
+      // and the wall is dark' is a status line, and this reaches it.
+      debug = true;
     } else if (arg === '--help' || arg === '-h') {
       usage();
       process.exit(0);
@@ -105,7 +113,7 @@ function parseArgs(argv) {
 
   const explicit = flag !== null || process.env.PORT !== undefined;
   const raw = flag ?? process.env.PORT ?? null;
-  if (raw === null) return { port: null, explicit: false, browser, app, electron };
+  if (raw === null) return { port: null, explicit: false, browser, app, electron, debug };
 
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -120,7 +128,7 @@ function parseArgs(argv) {
     console.error('Pick any other port, e.g. 8080');
     process.exit(2);
   }
-  return { port, explicit, browser, app, electron };
+  return { port, explicit, browser, app, electron, debug };
 }
 
 /**
@@ -130,7 +138,7 @@ function parseArgs(argv) {
  * decision in main.cjs. Web Serial is granted and answered programmatically
  * there (COM8 preferred), so the show needs no click ritual for the picker.
  */
-function openElectronWindow(url) {
+function openElectronWindow(url, debug = false) {
   // The electron package exports the binary path from CJS; ask a CJS child.
   const probe = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("electron"))'], {
     encoding: 'utf8',
@@ -148,7 +156,9 @@ function openElectronWindow(url) {
   // MainWindowHandle stays 0 - the app runs with no window on the desktop;
   // without it, 'LED Wall' appears). Electron is a GUI binary, so no console
   // window exists to hide in the first place.
-  const proc = spawn(bin, [main, url], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const args = [main, url];
+  if (debug) args.push('--remote-debugging-port=9223');
+  const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   proc.unref();
   // The single-instance newcomer touches the shared cache dir before it
   // notices the lock and exits; those errors are its last words, not the
@@ -417,11 +427,11 @@ for (const signal of process.platform === 'win32' ? ['SIGINT', 'SIGBREAK', 'SIGT
   process.once(signal, shutdown);
 }
 
-const { port, explicit, browser, app, electron } = parseArgs(process.argv.slice(2));
+const { port, explicit, browser, app, electron, debug } = parseArgs(process.argv.slice(2));
 
 let attempt = port ?? DEFAULT_PORT;
 for (let tries = 0; ; tries++) {
-  const outcome = await serveOnce(attempt, browser, app, electron);
+  const outcome = await serveOnce(attempt, browser, app, electron, debug);
   if (outcome.code === 0 || shuttingDown) break;
   // An explicit port is a request, not a preference. Only an unrequested 8080
   // may move, and only once.
