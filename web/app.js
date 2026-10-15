@@ -88,6 +88,39 @@ let sourceMode = 'text';
 /** The active renderer: a Scroller or a Panner. Both expose tick(panel). */
 let renderer = null;
 let sink = null;
+// Best-known path of the wall's port. A failed open cannot ask the port for
+// its info (there is no port), so the takeover needs the last good path -
+// and COM8 is this wall's shipped port.
+let lastSerialPort = 'COM8';
+
+/**
+ * Connect found the port busy: a corpse of a previous app instance is
+ * holding it (window closed uncleanly, process killed - Windows keeps the
+ * COM handle with the corpse). Ask the server to name the holder and
+ * terminate it. The server kills ONLY our own electron.exe; a foreign
+ * holder (Arduino IDE, PuTTY, a flasher) is named and spared - killing a
+ * user's editor mid-edit is not a side effect a Connect click should have.
+ * Returns true when a corpse was cleared, so Connect retries the open.
+ */
+async function serialTakeOver() {
+  try {
+    const r = await fetch('/serial/takeover', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ port: lastSerialPort }),
+    });
+    const j = await r.json();
+    if (j.killed && j.killed.length > 0) return true;
+    if (j.spared && j.spared.length > 0) {
+      const s = j.spared[0];
+      setOutput($('sinkOut'), `port held by ${s.name} (pid ${s.pid}) - close it, or: npm run freeport -- ${lastSerialPort} --kill`, 'warn');
+      return false;
+    }
+    return false;
+  } catch {
+    return false; // no server (file:// demo): the original error stands
+  }
+}
 let seq = 0;
 /**
  * The bytes the CURRENT sink was last given, or null for "this sink has had
@@ -500,6 +533,7 @@ async function connect() {
     // unrelated COM device, and 'connected: serial' over a dead wall is a
     // trap. The path and product name make a wrong choice visible.
     const info = sink.port?.getInfo?.();
+    if (info?.path) lastSerialPort = info.path;
     const whom = info
       ? `${info.path ?? 'port'}${info.usbProductName ? ` (${info.usbProductName})` : ''}`
       : '';
@@ -508,6 +542,32 @@ async function connect() {
     $('disconnect').disabled = false;
   } catch (err) {
     sink = null;
+    // A serial open failure is almost always 'port busy', and the usual
+    // holder is our own previous instance's corpse. Name it, kill it if it
+    // is ours, retry the open once. A spared foreign holder was already
+    // named by serialTakeOver.
+    if (kind === 'serial' && /serial port/i.test(String(err && err.message))) {
+      setOutput($('sinkOut'), 'serial port busy - checking for a stale instance...', 'warn');
+      if (await serialTakeOver()) {
+        try {
+          sink = await openSink(kind, { baud: Number($('baud').value), channel: CHANNEL });
+          const m2 = budget.toMeta();
+          lastMetaBr = m2.brightness;
+          sink.send(meta(m2));
+          lastSent = null;
+          setOutput($('sinkOut'), `connected: ${sink.kind} - ${lastSerialPort} (took over from the previous instance)`, 'ok');
+          $('connect').disabled = true;
+          $('disconnect').disabled = false;
+          return;
+        } catch (e2) {
+          sink = null;
+          setOutput($('sinkOut'), e2.message, 'err');
+          $('connect').disabled = false;
+          $('disconnect').disabled = true;
+          return;
+        }
+      }
+    }
     setOutput($('sinkOut'), err.message, 'err');
     $('connect').disabled = false;
     $('disconnect').disabled = true;

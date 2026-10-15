@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 import { Capture, parseCaptureParams } from './capture.js';
 import { parseMessage } from '../core/content-protocol.js';
 import { isFetchablePort } from './ports.js';
-import { serialPorts } from './serial.js';
+import { serialPorts, serialTakeOver } from './serial.js';
 import { FRAME_BYTES } from '../core/frame.js';
 import { DdpTransport } from './bridge.js';
 
@@ -382,6 +382,27 @@ const server = createServer(async (req, res) => {
     const ports = await serialPorts();
     respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
       JSON.stringify(ports));
+    return;
+  }
+  // POST /serial/takeover {port} - take the port from a dead app's corpse.
+  // The handle scan takes seconds, so the app calls this only on the
+  // failure path (Connect's open failed). The kill list is restricted to
+  // our own electron.exe (tools/serial.js): a foreign holder (Arduino IDE,
+  // PuTTY) is reported, never killed.
+  if (url.pathname === '/serial/takeover') {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1024) req.destroy(); });
+    req.on('end', () => {
+      let port = '';
+      try { port = JSON.parse(body).port; } catch { /* fallthrough */ }
+      serialTakeOver(port).then((r) => {
+        respond(res, r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+          JSON.stringify(r));
+      }, (e) => {
+        respond(res, 500, { 'Content-Type': 'application/json; charset=utf-8' },
+          JSON.stringify({ ok: false, error: String((e && e.message) || e), results: [] }));
+      });
+    });
     return;
   }
 

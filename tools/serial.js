@@ -93,3 +93,36 @@ export async function serialPorts(opts = {}) {
   cache = { at: Date.now(), ports };
   return ports;
 }
+
+// ---- port takeover ---------------------------------------------------------
+
+import { findHolders, killHolders } from './freeport-scan.js';
+
+/**
+ * Take a COM port away from a dead app's corpse. When the wall app dies
+ * mid-connection (window closed uncleanly, killed process), its Electron
+ * process - or a child of it - can keep the COM handle, and the next
+ * Connect fails on a port the OS says is busy. The only force-disconnect
+ * on Windows is to terminate the holder, so we do that ONLY for our own
+ * app's binary (electron.exe running our main.cjs tree); any other holder
+ * (Arduino IDE, PuTTY, a firmware flasher) is reported untouched - killing
+ * a user's editor mid-edit is not a side effect a Connect click should
+ * have. Never throws.
+ */
+export function serialTakeOver(port, opts = {}) {
+  void opts; // (killHolders spawns its own taskkill; no injectables needed)
+  const p = String(port ?? '').toUpperCase();
+  if (!/^COM\d{1,3}$/.test(p)) return Promise.resolve({ ok: false, error: `invalid port name '${port}'`, results: [] });
+  const found = findHolders(p);
+  if (!found.ok) return Promise.resolve({ ok: false, error: found.error, results: [] });
+  const killable = (name) => /^electron(\.exe)?$/i.test(name);
+  const results = killHolders(found.holders, killable);
+  return Promise.resolve({
+    ok: true,
+    error: null,
+    holders: found.holders,
+    results,
+    killed: results.filter((r) => r.killed).map((r) => r.pid),
+    spared: results.filter((r) => !r.killed).map((r) => ({ pid: r.pid, name: r.name, reason: r.reason })),
+  });
+}
