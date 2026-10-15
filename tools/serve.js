@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import { Capture, parseCaptureParams } from './capture.js';
 import { parseMessage } from '../core/content-protocol.js';
 import { isFetchablePort } from './ports.js';
+import { serialPorts } from './serial.js';
 import { FRAME_BYTES } from '../core/frame.js';
 import { DdpTransport } from './bridge.js';
 
@@ -373,6 +374,14 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/content') {
     handleContentGet(req, res);
+    return;
+  }
+  // GET /serial - [{port:'COM8', state:'FREE'|'BUSY'}]. The app shows this
+  // before Connect so 'port is taken' is a warning, not a mystery failure.
+  if (url.pathname === '/serial') {
+    const ports = await serialPorts();
+    respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+      JSON.stringify(ports));
     return;
   }
 

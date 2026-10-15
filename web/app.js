@@ -818,6 +818,28 @@ $('headroom').addEventListener('change', () => {
 $('connect').addEventListener('click', connect);
 $('disconnect').addEventListener('click', disconnect);
 
+// Serial pre-flight: a COM port is exclusive, and an open() failure on a
+// port held by the Arduino monitor (or a stale bridge) is the opaque
+// 'Failed to open serial port'. Ask the server which ports Windows reports
+// as busy BEFORE the user clicks Connect, so 'the port is taken' is a
+// named warning, not a mystery. The probe test-opens ports, which toggles
+// DTR/RTS and reboots a connected ESP32 - so this runs on load, not on a
+// timer; the server caches it for 3 s regardless.
+async function serialPreflight() {
+  try {
+    const res = await fetch('/serial');
+    if (!res.ok) return;
+    const ports = await res.json();
+    const busy = ports.filter((p) => p.state === 'busy').map((p) => p.port);
+    if (busy.length > 0 && sink === null) {
+      setOutput($('sinkOut'), `warning: ${busy.join(', ')} in use by another program - close its serial monitor before connecting`, 'warn');
+    }
+  } catch {
+    // Server without /serial (older serve.js): stay quiet, open() will report.
+  }
+}
+serialPreflight();
+
 window.addEventListener('resize', () => sim.resize());
 
 // ---------------------------------------------------------------------------
