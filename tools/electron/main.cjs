@@ -19,6 +19,16 @@ const path = require('node:path');
 
 const url = process.argv.find((a) => /^http:\/\//.test(a)) ?? 'http://127.0.0.1:8080/';
 
+// '--debug' is an APP argument (everything after main.cjs is), not a Chromium
+// switch - so interpret it here and set the switch programmatically. This
+// opens the DevTools protocol on loopback: the app page's fps counter, sink
+// status and frame errors become readable from outside while the show runs,
+// which is the difference between 'connect failed' and 'connected, wall
+// dark' when the launcher log shows only success up to the open.
+if (process.argv.includes('--debug')) {
+  app.commandLine.appendSwitch('remote-debugging-port', '9223');
+}
+
 // Dedicated userData inside the repo: the default (%APPDATA\<package name>)
 // collides with any other instance of this package - two instances fighting
 // over one cache directory produce 'Unable to move the cache: Access is

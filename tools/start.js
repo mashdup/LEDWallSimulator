@@ -157,7 +157,10 @@ function openElectronWindow(url, debug = false) {
   // without it, 'LED Wall' appears). Electron is a GUI binary, so no console
   // window exists to hide in the first place.
   const args = [main, url];
-  if (debug) args.push('--remote-debugging-port=9223');
+  // '--debug' as an APP argument: main.cjs turns it into the
+  // remote-debugging-port switch (post-path CLI args are app args, not
+  // Chromium switches - passing the raw switch here does nothing).
+  if (debug) args.push('--debug');
   const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   proc.unref();
   // The single-instance newcomer touches the shared cache dir before it
