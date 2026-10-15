@@ -379,7 +379,10 @@ const server = createServer(async (req, res) => {
   // GET /serial - [{port:'COM8', state:'FREE'|'BUSY'}]. The app shows this
   // before Connect so 'port is taken' is a warning, not a mystery failure.
   if (url.pathname === '/serial') {
-    const ports = await serialPorts();
+    // ?fresh=1 bypasses the 3 s cache: the takeover path needs the probe to
+    // RUN (its test-open clears the wch driver's zombie port-lock), not to
+    // answer from memory.
+    const ports = await serialPorts({ bypassCache: url.searchParams.get('fresh') === '1' });
     respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
       JSON.stringify(ports));
     return;

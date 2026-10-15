@@ -116,7 +116,13 @@ async function serialTakeOver() {
       setOutput($('sinkOut'), `port held by ${s.name} (pid ${s.pid}) - close it, or: npm run freeport -- ${lastSerialPort} --kill`, 'warn');
       return false;
     }
-    return false;
+    // No process holds the port, yet the open failed: the lock is in the
+    // wch driver, not in any process (measured: closing a connected app
+    // leaves the port un-openable for a while - the alternating
+    // 'works, fails, works' pattern). The probe's test-open clears that
+    // zombie lock as a side effect, so run one fresh and retry.
+    await fetch('/serial?fresh=1').catch(() => {});
+    return true;
   } catch {
     return false; // no server (file:// demo): the original error stands
   }
@@ -549,23 +555,32 @@ async function connect() {
     if (kind === 'serial' && /serial port/i.test(String(err && err.message))) {
       setOutput($('sinkOut'), 'serial port busy - checking for a stale instance...', 'warn');
       if (await serialTakeOver()) {
-        try {
-          sink = await openSink(kind, { baud: Number($('baud').value), channel: CHANNEL });
-          const m2 = budget.toMeta();
-          lastMetaBr = m2.brightness;
-          sink.send(meta(m2));
-          lastSent = null;
-          setOutput($('sinkOut'), `connected: ${sink.kind} - ${lastSerialPort} (took over from the previous instance)`, 'ok');
-          $('connect').disabled = true;
-          $('disconnect').disabled = false;
-          return;
-        } catch (e2) {
-          sink = null;
-          setOutput($('sinkOut'), e2.message, 'err');
-          $('connect').disabled = false;
-          $('disconnect').disabled = true;
-          return;
+        // The driver lock releases asynchronously after the probe; give it
+        // a beat, and retry once more if the first attempt lands mid-release.
+        await new Promise((r) => setTimeout(r, 400));
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            sink = await openSink(kind, { baud: Number($('baud').value), channel: CHANNEL });
+            break;
+          } catch (e2) {
+            if (attempt === 1) {
+              sink = null;
+              setOutput($('sinkOut'), e2.message, 'err');
+              $('connect').disabled = false;
+              $('disconnect').disabled = true;
+              return;
+            }
+            await new Promise((r) => setTimeout(r, 600));
+          }
         }
+        const m2 = budget.toMeta();
+        lastMetaBr = m2.brightness;
+        sink.send(meta(m2));
+        lastSent = null;
+        setOutput($('sinkOut'), `connected: ${sink.kind} - ${lastSerialPort} (took over from the previous instance)`, 'ok');
+        $('connect').disabled = true;
+        $('disconnect').disabled = false;
+        return;
       }
     }
     setOutput($('sinkOut'), err.message, 'err');
