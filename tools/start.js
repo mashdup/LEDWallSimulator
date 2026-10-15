@@ -222,6 +222,29 @@ function killStaleInstances() {
 }
 
 /**
+ * Kill serve.js processes left by dead launchers. Ctrl+C in a terminal that
+ * launched a detached app does not always take the whole tree down, and the
+ * orphaned server is the root of the 'kill the app, relaunch, connect fails'
+ * report: the stale launcher's Electron keeps COM8 (open() fails on a port
+ * the OS says is busy), and the stale server pushes the new show onto a
+ * random port, splitting the stack across two worlds. tools/serve.js is the
+ * launcher's own script, so at startup any instance is a zombie of a dead
+ * launcher - killing it is the clean field. (A deliberately standalone
+ * 'npm run serve' is caught by the same net; restarting it is cheap.)
+ */
+function killStaleServe() {
+  if (process.platform === 'win32') {
+    spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
+      "Where-Object { $_.CommandLine -like '*serve.js*' } | " +
+      'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'],
+      { stdio: 'ignore', windowsHide: true });
+  } else {
+    spawnSync('pkill', ['-f', 'serve.js'], { stdio: 'ignore' });
+  }
+}
+
+/**
  * Delete the whole profile directory. Chrome's session-restore triggers are
  * spread across the session files, Preferences (profile.exit_type), and the
  * exit marker; clearing a subset proved whack-a-mole (a reused profile kept
@@ -351,7 +374,7 @@ function openInBrowser(url) {
  * Run serve.js on one port, forwarding its output, and open the browser the
  * moment it reports a bound socket. Resolves with the exit outcome.
  */
-function serveOnce(port, openBrowser, appMode, electronMode) {
+function serveOnce(port, openBrowser, appMode, electronMode, debug = false) {
   return new Promise((done) => {
     const proc = spawn(process.execPath, [SERVE_SCRIPT, '--port', String(port)], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -368,7 +391,7 @@ function serveOnce(port, openBrowser, appMode, electronMode) {
       const ready = READY.exec(log);
       if (ready === null) return;
       announced = true;
-      if (electronMode) appChild = openElectronWindow(ready[1]);
+      if (electronMode) appChild = openElectronWindow(ready[1], debug);
       else if (appMode) appChild = openAppWindow(ready[1]);
       else if (openBrowser) openInBrowser(ready[1]);
       console.log(`start: ${ready[1]} — Ctrl+C to stop.`);
@@ -431,6 +454,11 @@ for (const signal of process.platform === 'win32' ? ['SIGINT', 'SIGBREAK', 'SIGT
 }
 
 const { port, explicit, browser, app, electron, debug } = parseArgs(process.argv.slice(2));
+
+// A zombie serve.js from a dead launcher holds the port AND splits the show
+// across two servers; the new launcher owns the script, so at startup every
+// existing serve.js is a zombie.
+killStaleServe();
 
 let attempt = port ?? DEFAULT_PORT;
 for (let tries = 0; ; tries++) {
