@@ -246,7 +246,10 @@ function draw() {
       if (scroller === null) return;
       // The banner's position is a pure function of server time: seek to the
       // phase of the current pass, render, paint. No local advance.
-      scroller.seek(((t * 1000) % passMs) / passMs);
+      // seek() wants a CELL offset in [0, period) - the pass fraction must
+      // be multiplied by the period (feeding the 0..1 fraction in directly
+      // parks the text under 1 cell from the start: visible, stone still).
+      scroller.seek((((t * 1000) % passMs) / passMs) * scroller.period);
       scroller.render(panel);
       paintBytes(panel.pixels);
       break;

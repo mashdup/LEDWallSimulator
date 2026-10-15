@@ -722,7 +722,12 @@ function pushContentFrame() {
   const tSec = cServerAt / 1000 + (performance.now() - cLocalAt) / 1000;
   let bytes;
   if (cState.kind === 'text' && cScroller !== null) {
-    cScroller.seek(((tSec * 1000) % cPassMs) / cPassMs);
+    // seek() takes a CELL offset in [0, period), not a fraction: the old
+    // code fed the pass fraction (0..1) straight in, so the text sat
+    // between 0 and 1 cell and wrapped - visible, and stone still. Multiply
+    // by the period to make the fraction an actual position.
+    const frac = cPassMs > 0 ? ((tSec * 1000) % cPassMs) / cPassMs : 0;
+    cScroller.seek(frac * cScroller.period);
     cScroller.render(cPanel);
     bytes = cPanel.pixels;
   } else {

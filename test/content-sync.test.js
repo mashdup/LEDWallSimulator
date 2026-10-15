@@ -280,3 +280,89 @@ test('two real browser tabs agree on the content after one POST', async () => {
     }
   }
 });
+
+test('text state SCROLLS: pushed frames change over time (regression: it sat still)', async () => {
+  // The frame pusher fed seek() a pass FRACTION (0..1) where it takes a
+  // CELL offset in [0, period): the text rendered, sat under one cell from
+  // the start, and wrapped - visible, and stone still. The wall showed the
+  // word and never moved it. A frame is only alive if it CHANGES, so this
+  // test compares two pushed frames 1.2 s apart: byte-identical PNGs from
+  // the same encoder mean a frozen banner.
+  const chrome = findChrome();
+  if (chrome === null) return; // no browser on this machine: nothing to prove
+
+  const serve = await startServe(await freePort());
+  const dbgPort = await freePort();
+  const profile = mkdtempSync(`${tmpdir()}\omp-scroll-`);
+  const proc = spawn(
+    chrome,
+    [
+      ...(chrome.includes('headless-shell') ? [] : ['--headless=new']),
+      '--no-sandbox',
+      '--no-first-run',
+      '--disable-gpu',
+      `--remote-debugging-port=${dbgPort}`,
+      `--user-data-dir=${profile}`,
+      'about:blank',
+    ],
+    {stdio: 'ignore'},
+  );
+
+  try {
+    const version = await waitFor(async () => {
+      try {
+        const r = await fetch(`http://127.0.0.1:${dbgPort}/json/version`);
+        return r.ok ? await r.json() : null;
+      } catch {
+        return null;
+      }
+    });
+    const cdp = await Cdp.open(version.webSocketDebuggerUrl);
+
+    // The app page, switched to the content feed: it is the frame driver.
+    // The eval must not race module load: the select exists in the static
+    // DOM long before app.js attaches its change listener, so a single
+    // dispatch can land in the void. Re-dispatch until frames flow.
+    const app = await cdp.openTab(`${serve.base}/`);
+    await waitFor(async () =>
+      cdp.eval(app, '!!document.getElementById("sourceMode")').catch(() => null),
+    20000);
+
+    await fetch(`${serve.base}/content`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({v: 1, kind: 'text', text: 'SCROLLING BANNER TEST', color: '#00ff00'}),
+    });
+
+    const frame = async () => {
+      const r = await fetch(`${serve.base}/content/frame`);
+      return r.ok ? Buffer.from(await r.arrayBuffer()) : null;
+    };
+    const dispatch = () =>
+      cdp.eval(
+        app,
+        '(() => { const s = document.getElementById("sourceMode"); s.value = "content"; s.dispatchEvent(new Event("change")); })();',
+      ).catch(() => {});
+    // A background tab in the test browser is throttled to ~1 Hz, so the
+    // first push can take a second; the dispatch retry covers the listener
+    // race, the budget covers the throttle.
+    const f1 = await waitFor(async () => {
+      const f = await frame();
+      if (f !== null) return f;
+      await dispatch();
+      await sleep(400);
+      return null;
+    }, 25000);
+    await sleep(1500);
+    const f2 = await waitFor(frame, 20000);
+    assert.ok(!f1.equals(f2), 'pushed text frames are byte-identical over 1.5 s: the banner is not scrolling');
+  } finally {
+    proc.kill();
+    await serve.stop();
+    try {
+      rmSync(profile, {recursive: true, force: true, maxRetries: 12, retryDelay: 150});
+    } catch {
+      /* leftover temp dir; nothing the assertions depend on */
+    }
+  }
+});
