@@ -40,21 +40,55 @@ export function parseProbeOutput(text) {
 
 let cache = { at: 0, ports: [] };
 const CACHE_MS = 3000;
+// PowerShell cold start on a busy Windows machine measured > 5 s; a tight
+// timeout made the probe kill itself mid-startup. 15 s is patient.
+const PROBE_TIMEOUT_MS = 15000;
 
-/** Probe the machine. Cached for CACHE_MS so Connect-click spam is free. */
-export async function serialPorts() {
-  if (Date.now() - cache.at < CACHE_MS) return cache.ports;
+/**
+ * Probe the machine. Cached for CACHE_MS so Connect-click spam is free.
+ * NEVER rejects and NEVER throws asynchronously: this runs inside the dev
+ * server, and an uncaught exception in the probe's timeout timer took the
+ * whole server down - 'kill("ignore")' is POSIX-only and throws on Windows
+ * (ERR_UNKNOWN_SIGNAL), so a slow PowerShell killed the show: blank content
+ * and a dead Connect, both blamed on the app. Every failure mode resolves
+ * to [] and the app stays quiet about it.
+ */
+export async function serialPorts(opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? PROBE_TIMEOUT_MS;
+  if (!opts.bypassCache && Date.now() - cache.at < CACHE_MS) return cache.ports;
   const ports = await new Promise((done) => {
-    const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROBE_PS], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-    });
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      done(parseProbeOutput(body));
+    };
     let body = '';
+    let ps;
+    try {
+      ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROBE_PS], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      });
+    } catch {
+      done([]); // spawn itself refused
+      return;
+    }
     ps.stdout.on('data', (d) => { body += d; });
-    const finish = () => done(parseProbeOutput(body));
     ps.on('error', () => done([])); // no PowerShell (non-Windows): report nothing
     ps.on('close', finish);
-    setTimeout(() => { ps.kill('ignore'); finish(); }, 5000).unref?.();
+    const timer = setTimeout(() => {
+      // A valid signal only: 'ignore' throws ERR_UNKNOWN_SIGNAL on Windows,
+      // and this timer runs on the SERVER's event loop - an exception here
+      // is a crashed dev server, which is exactly the regression this fixes.
+      try {
+        ps.kill(); // SIGTERM; TerminateProcess on Windows
+      } catch {
+        // Already exited, or the OS refuses: nothing to clean up.
+      }
+      finish();
+    }, timeoutMs);
+    timer.unref?.();
   });
   cache = { at: Date.now(), ports };
   return ports;

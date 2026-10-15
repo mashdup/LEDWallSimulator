@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 
 import { parseProbeOutput, serialPorts } from '../tools/serial.js';
 import { freePort, startServe } from './harness.js';
@@ -51,4 +52,30 @@ test('serialPorts caches: two calls in the window share one probe', async () => 
   const a = await serialPorts();
   const b = await serialPorts();
   assert.equal(a, b); // same array identity = cache hit, no second PowerShell
+});
+
+// Regression: the probe's timeout timer called ps.kill('ignore') - a POSIX
+// signal convention that THROWS ERR_UNKNOWN_SIGNAL on Windows. The timer
+// runs on the dev server's event loop, so a PowerShell cold start slower
+// than the timeout crashed the whole server: blank content, dead Connect,
+// and every symptom pointed at the app. These tests pin the probe's
+// promise: it resolves, always, whatever PowerShell does.
+test('probe timeout kills the hung probe and resolves - it must never throw (this crash killed the server)', async () => {
+  // timeoutMs 1 forces the kill path on every machine: a real PowerShell
+  // cannot cold-start in 1 ms. Before the fix this threw from the timer
+  // and took the process down.
+  const ports = await serialPorts({ timeoutMs: 1, bypassCache: true });
+  assert.ok(Array.isArray(ports));
+});
+
+test('probe resolves [] when PowerShell is unavailable', async () => {
+  // PATH stripped: spawn('powershell.exe') fails to resolve. The probe must
+  // answer 'no ports', not reject - the app treats [] as 'say nothing'.
+  const r = spawnSync(
+    process.execPath,
+    ['-e', "import('./tools/serial.js').then(m => m.serialPorts({ bypassCache: true })).then(p => console.log('RES:' + JSON.stringify(p)))"],
+    { encoding: 'utf8', env: { ...process.env, PATH: '' }, timeout: 20000 }
+  );
+  assert.match(String(r.stdout), /RES:\[\]/);
+  assert.equal(r.status, 0);
 });
