@@ -28,7 +28,7 @@ export const CONTENT_KINDS = ['clear', 'fill', 'rect', 'text', 'anim'];
  * headless capture browser - render the identical frame at the same second.
  * 'off' stops animation (black); 'demo' is the original bouncing block.
  */
-export const ANIM_NAMES = ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock', 'off'];
+export const ANIM_NAMES = ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock', 'snitch', 'off'];
 
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$|^[a-zA-Z]+$/;
 

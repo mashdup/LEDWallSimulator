@@ -372,6 +372,38 @@ function animDraw(name, tRaw) {
       WALL.set(Math.round(cx), Math.round(cy), '#ffffff');
       return;
     }
+    case 'snitch': {
+      // The Golden Snitch: twinkling night sky + a gold comet darting
+      // along a noise-perturbed Lissajous. Pure function of server time,
+      // identical to core/animations.js - every renderer draws the same
+      // frame at the same second.
+      for (let y = 0; y < G; y++) {
+        for (let x = 0; x < G; x++) {
+          const star = hash(x * 157.3 + y * 71.7);
+          if (star > 0.93) {
+            const tw = 0.35 + 0.3 * Math.sin(t * (1.5 + star * 2) + star * 40);
+            WALL.set(x, y, `rgb(${Math.round(45 * tw)},${Math.round(50 * tw)},${Math.round(80 * tw)})`);
+          } else {
+            WALL.set(x, y, 'rgb(6,8,22)');
+          }
+        }
+      }
+      const pos = (tt) => [
+        (G - 1) * (0.5 + 0.4 * Math.sin(tt * 1.9) + 0.1 * (noise(tt * 1.3, 11.3) - 0.5) * 2),
+        (G - 1) * (0.5 + 0.4 * Math.sin(tt * 2.6 + 1.3) + 0.1 * (noise(tt * 1.3, 47.7) - 0.5) * 2),
+      ];
+      for (let k = 10; k >= 1; k--) {
+        const [tx, ty] = pos(t - k * 0.05);
+        const a = (1 - k / 11) * 0.55;
+        WALL.set(Math.round(tx), Math.round(ty), `rgb(${Math.round(255 * a)},${Math.round(200 * a)},${Math.round(60 * a)})`);
+      }
+      const [sx, sy] = pos(t);
+      const scx = Math.round(sx);
+      const scy = Math.round(sy);
+      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) WALL.set(scx + dx, scy + dy, 'rgb(130,100,30)');
+      WALL.set(scx, scy, 'rgb(255,214,90)');
+      return;
+    }
     default: { // 'demo' and any future name falls back to the original
       const bx = (Math.sin(t * 1.3) * 0.5 + 0.5) * (G - 1);
       const by = (Math.sin(t * 0.9) * 0.5 + 0.5) * (G - 1);

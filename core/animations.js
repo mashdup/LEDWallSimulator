@@ -182,6 +182,43 @@ export function animFrame(state, tRaw, grid = 20) {
       set(Math.round(cx), Math.round(cy), 255, 255, 255);
       return px;
     }
+    case 'snitch': {
+      // The Golden Snitch: a night sky of faintly twinkling stars, and a
+      // gold comet darting along a Lissajous path perturbed by smooth
+      // noise - the erratic flit of something with wings. Deterministic
+      // like every animation: same server second, same frame in every
+      // renderer. The trail is analytic (past positions sampled from the
+      // same function), so no state and no local clock.
+      for (let y = 0; y < grid; y++) {
+        for (let x = 0; x < grid; x++) {
+          const star = hash(x * 157.3 + y * 71.7);
+          if (star > 0.93) {
+            const tw = 0.35 + 0.3 * Math.sin(t * (1.5 + star * 2) + star * 40);
+            set(x, y, 45 * tw, 50 * tw, 80 * tw);
+          } else {
+            set(x, y, 6, 8, 22);
+          }
+        }
+      }
+      const pos = (tt) => [
+        (grid - 1) * (0.5 + 0.4 * Math.sin(tt * 1.9) + 0.1 * (noise(tt * 1.3, 11.3) - 0.5) * 2),
+        (grid - 1) * (0.5 + 0.4 * Math.sin(tt * 2.6 + 1.3) + 0.1 * (noise(tt * 1.3, 47.7) - 0.5) * 2),
+      ];
+      for (let k = 10; k >= 1; k--) {
+        const [tx, ty] = pos(t - k * 0.05);
+        const a = (1 - k / 11) * 0.55;
+        set(Math.round(tx), Math.round(ty), 255 * a, 200 * a, 60 * a);
+      }
+      const [sx, sy] = pos(t);
+      const cx = Math.round(sx);
+      const cy = Math.round(sy);
+      set(cx - 1, cy, 130, 100, 30);
+      set(cx + 1, cy, 130, 100, 30);
+      set(cx, cy - 1, 130, 100, 30);
+      set(cx, cy + 1, 130, 100, 30);
+      set(cx, cy, 255, 214, 90);
+      return px;
+    }
     default: { // 'demo' and any future name falls back to the original
       const bx = Math.round((Math.sin(t * 1.3) * 0.5 + 0.5) * (grid - 1));
       const by = Math.round((Math.sin(t * 0.9) * 0.5 + 0.5) * (grid - 1));

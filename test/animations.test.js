@@ -65,3 +65,27 @@ test('parseHex handles short, long, and junk', () => {
   assert.deepEqual(parseHex('red'), [255, 255, 255]);
   assert.deepEqual(parseHex(undefined), [255, 255, 255]);
 });
+
+test('snitch: gold-dominant comet on a dark sky, and it flies', () => {
+  const f = animFrame({ v: 1, kind: 'anim', name: 'snitch' }, 1234.5);
+  // The snitch is gold: the brightest pixel must be red-dominant and bright.
+  let best = -1;
+  let bestPx = null;
+  for (let i = 0; i < f.length; i += 3) {
+    const lum = f[i] + f[i + 1] + f[i + 2];
+    if (lum > best) { best = lum; bestPx = [f[i], f[i + 1], f[i + 2]]; }
+  }
+  assert.ok(bestPx[0] > 200, `snitch core must be bright, got ${bestPx}`);
+  assert.ok(bestPx[0] > bestPx[2] * 2, `snitch core must be gold (blue-poor), got ${bestPx}`);
+  // Most of the sky is dark night, not a wash.
+  let dark = 0;
+  for (let i = 0; i < f.length; i += 3) if (f[i] + f[i + 1] + f[i + 2] < 90) dark++;
+  assert.ok(dark > 300, `night sky must dominate, ${dark}/400 dark`);
+  // It flies: a frame 0.5 s later has the snitch elsewhere.
+  const f2 = animFrame({ v: 1, kind: 'anim', name: 'snitch' }, 1235.0);
+  let moved = 0;
+  for (let i = 0; i < f.length; i += 3) {
+    if (Math.abs(f[i] - f2[i]) + Math.abs(f[i + 1] - f2[i + 1]) + Math.abs(f[i + 2] - f2[i + 2]) > 40) moved++;
+  }
+  assert.ok(moved > 10, `the snitch must move, ${moved} pixels changed`);
+});
