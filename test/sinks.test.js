@@ -228,23 +228,32 @@ test('open() requests a port, opens it at the wire baud, and is idempotent', asy
 });
 
 // Regression: kill the app while connected, launch again, 'connect' succeeds
-// and the wall is dark. The app's death left DTR/RTS at an arbitrary level,
-// and the ESP32 auto-reset circuit (DTR->IO0, RTS->EN) read that as 'stay in
-// the bootloader'. The port opened, writes succeeded, nothing arrived. The
-// fix is an esptool-style hard reset on open: IO0 released, reset pulsed.
-test('open() pulses a reset into run mode (kill-and-relaunch must not strand the chip in the bootloader)', async () => {
+// and the wall is dark. The auto-reset circuit reads DTR->IO0 and RTS->EN;
+// the FIRST pulse (dcba5d7) left DTR deasserted - which holds IO0 LOW - so
+// the pulse itself booted the chip into the bootloader, and the driver's
+// close defaults did the same on every clean close: the works/fails/works
+// alternation. The fix is esptool's reset_to_run: DTR ASSERTED (IO0 HIGH)
+// first and held, RTS pulsed, RTS released - the chip boots into firmware.
+// And close() pulses the same sequence before letting go, so the next app
+// finds a running chip, not a bootloader.
+test('open() pulses a reset into run mode (DTR asserted = IO0 HIGH, never the bootloader)', async () => {
   const port = fakePort();
   const sink = await connectedSink(port);
   try {
     assert.equal(port.signals.length, 2, 'expected a two-step setSignals reset pulse');
-    // Assert reset with IO0 released high: RTS low (reset asserted), DTR low
-    // deasserted (IO0 free to float high).
-    assert.deepEqual(port.signals[0], { dataTerminalLow: false, requestToSendLow: true });
-    // Release: the chip boots and runs the firmware.
-    assert.deepEqual(port.signals[1], { dataTerminalLow: false, requestToSendLow: false });
+    // IO0 HIGH (DTR asserted) and chip held in reset (RTS asserted).
+    assert.deepEqual(port.signals[0], { dataTerminalLow: true, requestToSendLow: true });
+    // Release reset with IO0 HIGH: the chip boots the firmware.
+    assert.deepEqual(port.signals[1], { dataTerminalLow: true, requestToSendLow: false });
   } finally {
     await sink.close();
   }
+  // close() pulses the same run-mode sequence before letting go, so the
+  // driver's deasserted-close defaults cannot strand the chip in the
+  // bootloader for the next app.
+  assert.equal(port.signals.length, 4, 'close() must pulse run mode too');
+  assert.deepEqual(port.signals[2], { dataTerminalLow: true, requestToSendLow: true });
+  assert.deepEqual(port.signals[3], { dataTerminalLow: true, requestToSendLow: false });
 });
 
 test('a driver without setSignals still connects (no modem control is not a failure)', async () => {

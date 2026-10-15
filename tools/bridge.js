@@ -808,7 +808,25 @@ export class SerialTransport {
     await new Promise((done, fail) => {
       this.port.open((err) => (err ? fail(new Error(`bridge: cannot open ${this.path}: ${err.message}`)) : done()));
     });
+    // Same run-mode pulse as the app's SerialSink (web/sinks.js): the
+    // previous host's close sequence (DTR deasserted -> IO0 LOW through the
+    // auto-reset circuit) leaves the chip in the BOOTLOADER; without this,
+    // the bridge writes to a dark wall. DTR asserted = IO0 HIGH = boot into
+    // firmware.
+    await this.#pulseRunMode(this.port);
     return this;
+  }
+
+  async #pulseRunMode(port) {
+    const set = (s) => new Promise((done, fail) => port.set(s, (err) => (err ? fail(err) : done())));
+    try {
+      await set({ dtr: true, rts: true });
+      await new Promise((done) => setTimeout(done, 100));
+      await set({ dtr: true, rts: false });
+    } catch {
+      // Drivers without modem control: nothing to pulse; the chip is
+      // already running. Not a connection failure.
+    }
   }
 
   /** @returns {boolean} false when the port is already carrying maxInFlight frames */
@@ -867,6 +885,10 @@ export class SerialTransport {
     this.port = null;
     for (const done of this.waiters) done();
     this.waiters.length = 0;
+    // Leave the chip RUNNING, not in the bootloader: pulse run mode before
+    // letting go so the next host (the app, the bridge, esptool) opens a
+    // port to a live firmware.
+    if (port.isOpen) await this.#pulseRunMode(port);
     if (port.isOpen) await new Promise((done) => port.close(done));
   }
 

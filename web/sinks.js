@@ -366,6 +366,12 @@ class SerialPortSink extends FrameSink {
     const writer = this.writer;
     this.port = null;
     this.writer = null;
+    // Leave the chip in RUN mode. The driver's close defaults deassert both
+    // lines, and deasserted DTR holds IO0 LOW through the auto-reset
+    // circuit - so the chip reboots into the BOOTLOADER on every app close,
+    // and the next app opens a port to a dark wall ('connected', streaming,
+    // nothing lit). Pulse a clean run-mode boot before letting go.
+    if (port !== null) await resetIntoRunMode(port);
     if (writer !== null) {
       try {
         // writer.close() waits for the records already queued to drain.
@@ -615,25 +621,27 @@ async function closePort(port, onDisconnect) {
 }
 
 /**
- * Force a clean boot into the app via the ESP32 auto-reset circuit
- * (DTR->IO0, RTS->EN through transistors, on every dev board).
+ * esptool-style hard reset into RUN mode, for the classic DTR->IO0 /
+ * RTS->EN transistor auto-reset circuit (measured on this board, and the
+ * reason 'kill the app, relaunch, wall dark' alternated):
  *
- * A host that dies mid-session - the app killed while connected - leaves
- * those lines at whatever level they had at death, and the classic residue
- * holds IO0 low: the chip sits in the BOOTLOADER. The next session then
- * opens the port, writes succeed, and the wall stays dark: 'connected' over
- * a dead wall, with nothing in the logs to say why.
+ *   DTR asserted  -> IO0 HIGH (Q1 off, pull-up wins)   -> boot into firmware
+ *   DTR deasserted-> IO0 LOW  (Q1 on, pulls IO0 down)  -> boot into BOOTLOADER
+ *   RTS asserted  -> EN LOW (Q2 on)                    -> chip held in reset
  *
- * The esptool hard-reset sequence forces a clean run: release IO0 (DTR
- * deasserted), pulse reset on EN (RTS), release. The chip reboots into the
- * firmware; its parser resyncs on the first 0xA5 header, so frames that
- * arrive during the ~2 s boot are discarded, not mis-parsed.
+ * The old pulse left DTR deasserted while pulsing RTS, so the chip came
+ * out of reset with IO0 LOW - straight into the bootloader. The pulse
+ * itself was stranding the chip, and the driver's close sequence (both
+ * signals deasserted) did the same on every app close: works, fails,
+ * works, fails. The fix is esptool's reset_to_run: assert DTR (IO0 HIGH)
+ * FIRST and hold it, pulse RTS (reset), release RTS - the chip boots
+ * with IO0 HIGH and runs the firmware.
  */
 async function resetIntoRunMode(port) {
   try {
-    await port.setSignals({ dataTerminalLow: false, requestToSendLow: true });
+    await port.setSignals({ dataTerminalLow: true, requestToSendLow: true });
     await new Promise((r) => setTimeout(r, 100));
-    await port.setSignals({ dataTerminalLow: false, requestToSendLow: false });
+    await port.setSignals({ dataTerminalLow: true, requestToSendLow: false });
   } catch {
     // Drivers without modem control (virtual ports, some adapters): nothing
     // to pulse, and the chip is already running. Not a connection failure.
