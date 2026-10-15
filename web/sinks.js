@@ -293,6 +293,10 @@ class SerialPortSink extends FrameSink {
       );
     }
 
+    // The chip may have been left in the bootloader by the last session's
+    // death; a reset pulse is what makes 'kill the app, launch again' work.
+    await resetIntoRunMode(port);
+
     this.port = port;
     try {
       this.writer = port.writable.getWriter();
@@ -607,6 +611,32 @@ async function closePort(port, onDisconnect) {
     await port.close();
   } catch {
     // Already closed, or closed by the browser after a disconnect.
+  }
+}
+
+/**
+ * Force a clean boot into the app via the ESP32 auto-reset circuit
+ * (DTR->IO0, RTS->EN through transistors, on every dev board).
+ *
+ * A host that dies mid-session - the app killed while connected - leaves
+ * those lines at whatever level they had at death, and the classic residue
+ * holds IO0 low: the chip sits in the BOOTLOADER. The next session then
+ * opens the port, writes succeed, and the wall stays dark: 'connected' over
+ * a dead wall, with nothing in the logs to say why.
+ *
+ * The esptool hard-reset sequence forces a clean run: release IO0 (DTR
+ * deasserted), pulse reset on EN (RTS), release. The chip reboots into the
+ * firmware; its parser resyncs on the first 0xA5 header, so frames that
+ * arrive during the ~2 s boot are discarded, not mis-parsed.
+ */
+async function resetIntoRunMode(port) {
+  try {
+    await port.setSignals({ dataTerminalLow: false, requestToSendLow: true });
+    await new Promise((r) => setTimeout(r, 100));
+    await port.setSignals({ dataTerminalLow: false, requestToSendLow: false });
+  } catch {
+    // Drivers without modem control (virtual ports, some adapters): nothing
+    // to pulse, and the chip is already running. Not a connection failure.
   }
 }
 

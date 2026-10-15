@@ -58,6 +58,10 @@ function fakePort({ hold = false, fail = false, openError = null } = {}) {
       if (openError !== null) throw new Error(openError);
       port.opened = opts;
     },
+    signals: [],
+    setSignals: async (s) => {
+      port.signals.push(s);
+    },
     close: async () => {
       port.closed = true;
     },
@@ -218,6 +222,37 @@ test('open() requests a port, opens it at the wire baud, and is idempotent', asy
 
     const again = await sink.open();
     assert.equal(again, port, 'an open sink must not prompt for a port again');
+  } finally {
+    await sink.close();
+  }
+});
+
+// Regression: kill the app while connected, launch again, 'connect' succeeds
+// and the wall is dark. The app's death left DTR/RTS at an arbitrary level,
+// and the ESP32 auto-reset circuit (DTR->IO0, RTS->EN) read that as 'stay in
+// the bootloader'. The port opened, writes succeeded, nothing arrived. The
+// fix is an esptool-style hard reset on open: IO0 released, reset pulsed.
+test('open() pulses a reset into run mode (kill-and-relaunch must not strand the chip in the bootloader)', async () => {
+  const port = fakePort();
+  const sink = await connectedSink(port);
+  try {
+    assert.equal(port.signals.length, 2, 'expected a two-step setSignals reset pulse');
+    // Assert reset with IO0 released high: RTS low (reset asserted), DTR low
+    // deasserted (IO0 free to float high).
+    assert.deepEqual(port.signals[0], { dataTerminalLow: false, requestToSendLow: true });
+    // Release: the chip boots and runs the firmware.
+    assert.deepEqual(port.signals[1], { dataTerminalLow: false, requestToSendLow: false });
+  } finally {
+    await sink.close();
+  }
+});
+
+test('a driver without setSignals still connects (no modem control is not a failure)', async () => {
+  const port = fakePort();
+  delete port.setSignals;
+  const sink = await connectedSink(port);
+  try {
+    assert.equal(sink.connected, true);
   } finally {
     await sink.close();
   }
