@@ -1,6 +1,6 @@
 {
   "name": "led-wall-simulator",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "description": "1m^2 APA106/PL9823 curtain wall: browser is the brain, ESP32 is a dumb pixel sink.",
