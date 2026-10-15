@@ -8,7 +8,8 @@
     "test": "node --test \"test/*.test.js\"",
     "serve": "node tools/serve.js",
     "start": "node tools/start.js",
-    "wall": "node tools/start.js --electron"
+    "wall": "node tools/start.js --electron",
+    "freeport": "node tools/freeport.js"
   },
   "dependencies": {
     "serialport": "^13.0.0"
