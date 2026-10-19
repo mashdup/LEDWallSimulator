@@ -9,6 +9,7 @@ import {
   freePort,
   startServe,
   openBrowser,
+  noGuards,
   waitForValue as waitFor,
   dropProfile,
   decodePng,
@@ -74,7 +75,7 @@ test('a pic message paints the drawing on the wall feed, cell for cell', async (
   if (chrome === null) return;
 
   const dir = mkdtempSync(join(tmpdir(), 'omp-pic-'));
-  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json')]);
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json'), ...noGuards()]);
   const dbgPort = await freePort();
   const profile = mkdtempSync(join(tmpdir(), 'omp-pic-profile-'));
   let proc = null;
@@ -129,7 +130,7 @@ test('the gallery cycles the saved drawings, driven by the server clock', async 
   if (chrome === null) return;
 
   const dir = mkdtempSync(join(tmpdir(), 'omp-gallery-'));
-  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json')]);
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json'), ...noGuards()]);
   const dbgPort = await freePort();
   const profile = mkdtempSync(join(tmpdir(), 'omp-gallery-profile-'));
   let proc = null;
@@ -180,9 +181,12 @@ test('the gallery cycles the saved drawings, driven by the server clock', async 
     assert.match(status, /gallery [12]\/2 · (red|blue)/);
 
     // An empty gallery is a black wall, not a crash: delete everything and
-    // the renderer must keep serving frames.
+    // the renderer must keep serving frames. The owner token is what opens a
+    // delete - the same gate the owner's page uses.
     for (const id of [red.json.id, blue.json.id]) {
-      await fetch(`${serve.base}/drawings/${id}`, { method: 'DELETE' });
+      await fetch(`${serve.base}/drawings/${id}`, {
+        method: 'DELETE', headers: { 'x-wall-owner': 'test-owner-token' },
+      });
     }
     const cleared = await frameWhere(serve, (s) => (at(s.rgba, 0, 0)[3] === 0 ? s : null), 15_000);
     assert.ok(cleared, 'an emptied gallery must go dark');
@@ -199,7 +203,7 @@ test('the APP tab as frame driver shows drawings too, not the demo', async () =>
   if (chrome === null) return;
 
   const dir = mkdtempSync(join(tmpdir(), 'omp-appdraw-'));
-  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json')]);
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json'), ...noGuards()]);
   const dbgPort = await freePort();
   const profile = mkdtempSync(join(tmpdir(), 'omp-appdraw-profile-'));
   let proc = null;
@@ -259,6 +263,74 @@ test('the APP tab as frame driver shows drawings too, not the demo', async () =>
       const c = at(s.rgba, 0, 0);
       return c[1] === 255 && c[3] === 255 ? s : null;
     }, 25_000);
+  } finally {
+    if (proc !== null) proc.kill();
+    await serve.stop();
+    dropProfile(profile);
+    dropProfile(dir);
+  }
+});
+
+test('the owner prunes the gallery with the token, and a page without it cannot', async () => {
+  const chrome = findChrome();
+  if (chrome === null) return;
+
+  const dir = mkdtempSync(join(tmpdir(), 'omp-owner-'));
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json'), ...noGuards()]);
+  const dbgPort = await freePort();
+  const profile = mkdtempSync(join(tmpdir(), 'omp-owner-profile-'));
+  let proc = null;
+
+  try {
+    const one = await postJson(`${serve.base}/drawings`, {
+      name: 'red', pixels: pixelsToHex(solid([255, 0, 0])),
+    });
+    assert.ok(one.ok);
+
+    const browser = await openBrowser(chrome, dbgPort, profile);
+    proc = browser.proc;
+    const cdp = browser.cdp;
+    const tab = await cdp.openTab(`${serve.base}/draw.html`);
+    const listed = async () => cdp.eval(tab, `document.querySelectorAll('#entries .entry').length === 1 ? 'ready' : null`)
+      .catch(() => null);
+    await waitFor(listed, 15_000);
+
+    // No token in this browser: the ✕ is refused, out loud, and the entry
+    // stays. A guest page has nothing to add here - it is not shown a button
+    // that can only fail in the first place.
+    await cdp.eval(tab, `document.querySelector('#entries .entry button:last-child').click()`);
+    const refused = await waitFor(async () => {
+      const t = await cdp.eval(tab, 'document.getElementById("status").textContent').catch(() => '');
+      return /owner token/i.test(t) ? t : null;
+    }, 10_000);
+    assert.match(refused, /owner token/);
+    assert.equal((await (await fetch(`${serve.base}/drawings`)).json()).length, 1,
+      'a page with no token cannot prune the gallery');
+
+    // The token, typed once and remembered per browser. The reload is deferred
+    // because navigating destroys the execution context the eval is running in.
+    await cdp.eval(tab, `(() => {
+      localStorage.setItem('ledwall-owner-token', 'test-owner-token');
+      setTimeout(() => location.reload(), 0);
+      return 'ok';
+    })()`).catch(() => null);
+    // Readiness is the RELOADED page: the token in the field (it is read from
+    // storage at load) and the entry listed. Polling only the entry list can
+    // be answered by the old page still on screen, and the next click then
+    // lands on a page mid-navigation with no DOM at all.
+    await waitFor(async () => cdp.eval(tab, `(() => {
+      const ok = document.getElementById('owner')?.value === 'test-owner-token'
+        && document.querySelectorAll('#entries .entry').length === 1;
+      return ok ? 'ready' : null;
+    })()`).catch(() => null), 15_000);
+
+    await cdp.eval(tab, `document.querySelector('#entries .entry button:last-child').click()`);
+    await waitFor(async () => {
+      const metas = await (await fetch(`${serve.base}/drawings`)).json();
+      return metas.length === 0;
+    }, 10_000);
+    assert.deepEqual(await (await fetch(`${serve.base}/drawings`)).json(), [],
+      'the owner token prunes what a stranger cannot touch');
   } finally {
     if (proc !== null) proc.kill();
     await serve.stop();

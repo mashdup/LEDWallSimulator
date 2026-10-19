@@ -9,6 +9,7 @@ import {
   freePort,
   startServe,
   openBrowser,
+  noGuards,
   waitForValue as waitFor,
   dropProfile,
 } from './harness.js';
@@ -51,7 +52,11 @@ const SPY = `(() => {
   const fetch0 = window.fetch;
   window.fetch = (url, opts) => {
     const m = (opts && opts.method ? String(opts.method) : 'GET').toUpperCase();
-    window.__calls.push(m + ' ' + String(url));
+    const h = (opts && opts.headers) || {};
+    // Which key a request carries is the capability, so the log records it: an
+    // entry secret opens one entry, an owner token opens the gallery.
+    const tag = h['x-wall-delete'] ? ' [entry-secret]' : (h['x-wall-owner'] ? ' [owner]' : '');
+    window.__calls.push(m + ' ' + String(url) + tag);
     return fetch0(url, opts);
   };
   const WS = window.WebSocket;
@@ -64,7 +69,7 @@ test('a guest draws, signs, saves - and touches the server exactly once', async 
   if (chrome === null) return;
 
   const dir = mkdtempSync(join(tmpdir(), 'omp-public-'));
-  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json')]);
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json'), ...noGuards()]);
   const dbgPort = await freePort();
   const profile = mkdtempSync(join(tmpdir(), 'omp-public-profile-'));
   let proc = null;
@@ -123,11 +128,6 @@ test('a guest draws, signs, saves - and touches the server exactly once', async 
       'the only request a guest page may make is the gallery save');
     assert.deepEqual(JSON.parse(await cdp.eval(tab, 'JSON.stringify(window.__ws)')), [], 'no socket: no wall feed');
 
-    // Belt to the same braces: the wall's content state is untouched - same
-    // rev, before and after a guest saved.
-    const after = await (await fetch(`${serve.base}/content`)).json();
-    assert.equal(after.rev, before.rev, 'a guest save must not change the wall content rev');
-
     // And the DOM a guest can see carries no wall controls and no wall panel:
     // not hidden, not disabled - absent.
     const dom = await cdp.eval(tab, `(() => {
@@ -146,6 +146,26 @@ test('a guest draws, signs, saves - and touches the server exactly once', async 
       return t.startsWith('Next one in') ? t : null;
     }, 5_000);
     assert.match(label, /Next one in \d+ s/, 'the save must be followed by the cooldown label');
+
+    // Take it back: the save response carried a per-entry delete secret, this
+    // browser kept it, and it opens exactly this entry - not the gallery. The
+    // guest sends no owner token, and has none to send.
+    assert.equal(await cdp.eval(tab, 'document.getElementById("takeback").hidden'), false,
+      'the card must offer the guest their own undo');
+    await cdp.eval(tab, `document.getElementById('takeback').click()`);
+
+    await waitFor(async () => {
+      const metas = await (await fetch(`${serve.base}/drawings`)).json();
+      return metas.length === 0;
+    }, 10_000);
+    assert.deepEqual(JSON.parse(await cdp.eval(tab, 'JSON.stringify(window.__calls)')),
+      [`POST /drawings`, `DELETE /drawings/${list[0].id} [entry-secret]`],
+      'the undo is the guest\'s own entry, opened by its own secret');
+
+    // Belt to the same braces: the wall's content state is untouched - same
+    // rev, before and after a guest saved and took it back.
+    const after = await (await fetch(`${serve.base}/content`)).json();
+    assert.equal(after.rev, before.rev, 'a guest save must not change the wall content rev');
   } finally {
     if (proc !== null) proc.kill();
     await serve.stop();

@@ -5,6 +5,14 @@
 // not — so the page must be reached over loopback for the serial sink to work.
 //
 // Usage: node tools/serve.js [--port 8080]   (or: npm run serve, PORT=8080)
+//
+// Gallery guards for the guest page (web/public.html), all server-side:
+//   --rate-spacing <ms>   minimum gap between POST /drawings per address (10000; 0 off)
+//   --rate-burst <n>      posts allowed per --rate-window (6; 0 off)
+//   --rate-window <ms>    burst window (60000)
+//   --max-drawings <n>    gallery size cap (200; 0 off)
+//   --owner-token <hex>   the DELETE token (else WALL_OWNER_TOKEN, else a random
+//                         one saved to data/owner-token.txt and printed at start)
 
 import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
@@ -12,7 +20,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { Capture, parseCaptureParams } from './capture.js';
 import { parseMessage } from '../core/content-protocol.js';
@@ -52,6 +60,20 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
+/** Flag number: --name 5000 -> 5000; absent, unparsable or negative -> default. */
+function flagNumber(argv, name, dflt) {
+  const i = argv.indexOf(name);
+  if (i < 0) return dflt;
+  const v = Number(argv[i + 1]);
+  return Number.isFinite(v) && v >= 0 ? v : dflt;
+}
+
+/** Flags this server reads, each with one value: --name <value>. */
+const VALUE_FLAGS = new Set([
+  '--ddp', '--data', '--owner-token',
+  '--rate-spacing', '--rate-burst', '--rate-window', '--max-drawings',
+]);
+
 /** Parse --port / PORT with the documented precedence: flag > env > default. */
 function resolvePort(argv) {
   let flag = null;
@@ -61,13 +83,12 @@ function resolvePort(argv) {
       flag = argv[++i];
     } else if (arg.startsWith('--port=')) {
       flag = arg.slice('--port='.length);
-    } else if (arg === '--ddp') {
-      i++; // consumed by resolveDdpTarget; accepted here so one argv carries both
-    } else if (arg === '--data') {
-      i++; // consumed by resolveDataFile, same as --ddp
+    } else if (VALUE_FLAGS.has(arg)) {
+      i++; // consumed by its own resolver; accepted here so one argv carries all of them
     } else {
       console.error(`serve: unknown argument ${arg}`);
-      console.error('usage: node tools/serve.js [--port <port>] [--ddp <host>]');
+      console.error('usage: node tools/serve.js [--port <port>] [--ddp <host>] [--data <file>]');
+      console.error('       [--owner-token <hex>] [--rate-spacing <ms>] [--rate-burst <n>] [--rate-window <ms>] [--max-drawings <n>]');
       process.exit(2);
     }
   }
@@ -358,10 +379,11 @@ function handleContentFrameGet(req, res) {
  * the hex wire form core/drawings.js defines, and validateEntry is the
  * gate - the store never holds a malformed drawing.
  *
- * No users, no moderation: anyone who can reach the site can add an entry
- * (it is a self-hosted family wall). The list is ordered oldest first, so
- * the gallery's clock-cycling (index = floor(t/interval) % n) shows a
- * stable order that never reshuffles while it cycles.
+ * No users and no moderation: anyone who can reach the site can add an entry
+ * (it is a self-hosted family wall), so the write path is guarded by address
+ * and the delete path by a token - see the guards below. The list is ordered
+ * oldest first, so the gallery's clock-cycling (index = floor(t/interval) % n)
+ * shows a stable order that never reshuffles while it cycles.
  */
 function resolveDataFile(argv) {
   const i = argv.indexOf('--data');
@@ -397,6 +419,116 @@ function drawingMetas() {
   return drawings.list.map(({ id, name, createdAt }) => ({ id, name, createdAt }));
 }
 
+/**
+ * The public view of one entry: the pixels, and never the delete secret.
+ *
+ * The secret is handed to the creator ONCE, in the POST response, and stored
+ * beside the entry. If GET /drawings/<id> echoed it, the gallery would be
+ * deletable by every visitor - the list is public, so a guest could read the
+ * secret of every entry in two requests. The store keeps it, the API never
+ * serves it.
+ */
+function publicEntry(e) {
+  return { id: e.id, name: e.name, pixels: e.pixels, createdAt: e.createdAt };
+}
+
+/**
+ * The guest page's guards. web/public.html is handed to people with no account
+ * and no name, so the server's only identities are the source address and a
+ * token, and both guards live HERE: a client-side cooldown is a speed bump, not
+ * a limit.
+ *
+ *   rate   - a per-address spacing and burst window on POST /drawings, plus a
+ *            total gallery cap. A flood is the realistic failure of a wall you
+ *            put a QR code in front of.
+ *   tokens - DELETE needs the owner token, or the entry's own delete secret
+ *            (given to the creator at POST time, so a guest can take their own
+ *            drawing back). Without a token the gallery is append-only for a
+ *            stranger, and only the owner's list is prunable.
+ *
+ * The address is the SOCKET address, on purpose: X-Forwarded-For is trivially
+ * forged by exactly the client this limit exists for, and this server is
+ * loopback-bound with no proxy in front of it that would set it truthfully.
+ */
+const rate = {
+  spacingMs: flagNumber(process.argv.slice(2), '--rate-spacing', 10_000),
+  burst: flagNumber(process.argv.slice(2), '--rate-burst', 6),
+  windowMs: flagNumber(process.argv.slice(2), '--rate-window', 60_000),
+  maxEntries: flagNumber(process.argv.slice(2), '--max-drawings', 200),
+};
+
+const hits = new Map(); // address -> { last, times: [] }
+
+/**
+ * rateGate(addr) -> {ok} | {ok:false, retryMs, why}.
+ *
+ * A REJECTED post records nothing: if it did, hammering the endpoint would push
+ * one's own lockout further out, so a flood would be its own reward and a
+ * legitimate guest who tapped twice would be locked for minutes.
+ */
+function rateGate(addr) {
+  const now = Date.now();
+  if (hits.size > 32) { // one small record per address seen in the window
+    for (const [k, v] of hits) if (now - v.last > rate.windowMs) hits.delete(k);
+  }
+  const h = hits.get(addr) ?? { last: 0, times: [] };
+  hits.set(addr, h);
+  if (rate.spacingMs > 0 && now - h.last < rate.spacingMs) {
+    return { ok: false, retryMs: rate.spacingMs - (now - h.last), why: 'one at a time' };
+  }
+  if (rate.burst > 0) {
+    h.times = h.times.filter((t) => now - t < rate.windowMs);
+    if (h.times.length >= rate.burst) {
+      return { ok: false, retryMs: rate.windowMs - (now - h.times[0]), why: 'too many in a row' };
+    }
+  }
+  h.last = now;
+  h.times.push(now);
+  return { ok: true };
+}
+
+function clientAddr(req) {
+  return req.socket?.remoteAddress ?? '?';
+}
+
+/**
+ * The owner token: --owner-token <hex>, then WALL_OWNER_TOKEN, then a random
+ * one persisted beside the store (data/owner-token.txt), so the owner can copy
+ * it once and it survives every restart. An empty token DISABLES owner auth -
+ * it is not a shared secret of "", and a guest sending an empty header must not
+ * be handed the delete path.
+ */
+function resolveOwnerToken(argv) {
+  const i = argv.indexOf('--owner-token');
+  if (i >= 0 && typeof argv[i + 1] === 'string' && argv[i + 1].trim() !== '') {
+    return { token: argv[i + 1].trim(), file: null };
+  }
+  const env = (process.env.WALL_OWNER_TOKEN ?? '').trim();
+  if (env !== '') return { token: env, file: null };
+  const file = join(dirname(drawings.file), 'owner-token.txt');
+  try {
+    const t = readFileSync(file, 'utf8').trim();
+    if (t !== '') return { token: t, file };
+  } catch { /* no file yet */ }
+  const fresh = randomBytes(16).toString('hex');
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${fresh}\n`);
+  } catch (err) {
+    console.error(`serve: owner token not saved (${err.message}); this one lasts until restart`);
+  }
+  return { token: fresh, file };
+}
+
+const owner = resolveOwnerToken(process.argv.slice(2));
+
+/** Constant-time compare, length-guarded (timingSafeEqual throws on a mismatch). */
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
 async function handleDrawings(req, res, url) {
   const seg = url.pathname.split('/');
   if (req.method === 'GET') {
@@ -407,7 +539,7 @@ async function handleDrawings(req, res, url) {
       if (e === undefined) {
         respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no such drawing\n');
       } else {
-        respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(e));
+        respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(publicEntry(e)));
       }
       return;
     }
@@ -417,6 +549,24 @@ async function handleDrawings(req, res, url) {
   if (req.method === 'POST') {
     if (seg.length !== 2) {
       respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, `404 Not Found: ${req.url}\n`);
+      return;
+    }
+    // The gate runs BEFORE the body is read: a rejected post should not make
+    // the server absorb 3.3 KB it is going to throw away. A client whose body
+    // is still being written may see the reset instead of the 429 - both are
+    // "refused", which is what the guest page shows.
+    const gate = rateGate(clientAddr(req));
+    if (!gate.ok) {
+      const secs = Math.max(1, Math.ceil(gate.retryMs / 1000));
+      respond(res, 429, { 'Retry-After': String(secs), 'Content-Type': 'text/plain; charset=utf-8' },
+        `${gate.why} - try again in ${secs} s\n`);
+      return;
+    }
+    if (rate.maxEntries > 0 && drawings.list.length >= rate.maxEntries) {
+      // 507: the gallery is the owner's resource, and the honest answer to a
+      // full one is "full", not "saved".
+      respond(res, 507, { 'Content-Type': 'text/plain; charset=utf-8' },
+        'the gallery is full - the owner prunes it\n');
       return;
     }
     const chunks = [];
@@ -444,18 +594,36 @@ async function handleDrawings(req, res, url) {
     // would encode each character, not each byte, and store 6400 chars of
     // nonsense - so the conversion is explicit here, at the boundary.
     const e = newDrawing(body.name, pixelsFromHex(body.pixels));
+    // The creator's undo token, served ONCE, here and nowhere else: the guest
+    // page keeps it in that browser's storage and can take its own drawing
+    // back, and nobody who did not post it has it.
+    e.secret = randomBytes(10).toString('hex');
     drawings.list.push(e);
     saveDrawings();
     respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' },
-      JSON.stringify({ id: e.id, name: e.name, createdAt: e.createdAt }));
+      JSON.stringify({ id: e.id, name: e.name, createdAt: e.createdAt, secret: e.secret }));
     return;
   }
   if (req.method === 'DELETE') {
-    const id = seg[2];
-    const i = drawings.list.findIndex((d) => d.id === id);
+    const ownerHdr = req.headers['x-wall-owner'];
+    const delHdr = req.headers['x-wall-delete'];
+    if (typeof ownerHdr !== 'string' && typeof delHdr !== 'string') {
+      respond(res, 401, { 'Content-Type': 'text/plain; charset=utf-8' },
+        'X-Wall-Owner (the owner token) or X-Wall-Delete (the entry secret) is required\n');
+      return;
+    }
+    const isOwner = owner.token !== '' && typeof ownerHdr === 'string' && safeEqual(ownerHdr, owner.token);
+    const i = drawings.list.findIndex((d) => d.id === seg[2]);
     if (i < 0) {
       respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no such drawing\n');
       return;
+    }
+    if (!isOwner) {
+      const secret = drawings.list[i].secret;
+      if (typeof delHdr !== 'string' || typeof secret !== 'string' || !safeEqual(delHdr, secret)) {
+        respond(res, 403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'that token does not open this entry\n');
+        return;
+      }
     }
     drawings.list.splice(i, 1);
     saveDrawings();
@@ -605,6 +773,14 @@ server.listen(port, HOST, () => {
   console.log(`LED wall dev server: http://${HOST}:${port}/`);
   console.log(`Serving ${ROOT}`);
   console.log('Web Serial needs this loopback URL — a LAN IP will not expose navigator.serial.');
+  const burst = rate.burst > 0 ? `, burst ${rate.burst} per ${rate.windowMs / 1000} s` : '';
+  const cap = rate.maxEntries > 0 ? `, cap ${rate.maxEntries} entries` : '';
+  console.log(`serve: guest posts: one per ${rate.spacingMs / 1000} s per address${burst}${cap}`);
+  // Printed on purpose: this is a self-hosted wall on one machine, and the
+  // owner needs the token to prune the gallery from draw.html. It is also in
+  // data/owner-token.txt, so it survives the console scrolling away.
+  console.log(`serve: owner token (draw.html -> "owner token"): ${owner.token}`
+    + (owner.file === null ? '' : `  [saved to ${owner.file}]`));
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

@@ -102,6 +102,16 @@ export const captureQuery = (params) => new URLSearchParams(params).toString();
  * silent when it breaks, so it exists once, here.
  */
 
+/**
+ * Args that turn the gallery's guest guards off, for suites that post several
+ * drawings to one server instance. The guards are ON by default - the guest
+ * page is the one handed to strangers - so opting out has to be visible at
+ * every call site that does.
+ */
+export function noGuards() {
+  return ['--rate-spacing', '0', '--rate-burst', '0', '--max-drawings', '0', '--owner-token', 'test-owner-token'];
+}
+
 /** Poll a JSON endpoint until it answers, or the budget runs out. */
 export async function pollJson(url, budgetMs = 15_000) {
   const deadline = Date.now() + budgetMs;
