@@ -89,3 +89,31 @@ test('snitch: gold-dominant comet on a dark sky, and it flies', () => {
   }
   assert.ok(moved > 10, `the snitch must move, ${moved} pixels changed`);
 });
+import { emptyPixels, pixelsToHex } from '../core/drawings.js';
+
+test('a pic state paints its own cells, and an unused cell is black, not white', () => {
+  const p = emptyPixels();
+  const put = (x, y, r, g, b) => {
+    const i = (y * G + x) * 4;
+    p[i] = r; p[i + 1] = g; p[i + 2] = b; p[i + 3] = 255;
+  };
+  put(5, 7, 255, 0, 0);
+  put(19, 0, 0, 0, 255);
+  const px = animFrame({ v: 1, kind: 'pic', pixels: pixelsToHex(p) }, 100);
+  assert.deepEqual(at(px, 5, 7), [255, 0, 0]);
+  assert.deepEqual(at(px, 19, 0), [0, 0, 255]);
+  assert.deepEqual(at(px, 5, 8), [0, 0, 0], 'a cell with a=0 is the wall being off');
+  assert.equal(lit(px), 2);
+
+  // Junk pixels are a black frame, not a throw: the driver pushes every tick.
+  assert.equal(lit(animFrame({ v: 1, kind: 'pic', pixels: 'deadbeef' }, 100)), 0);
+});
+
+test('gallery is black in the pure generator, NOT the demo (the reported bug)', () => {
+  // animFrame's default branch is the demo, which is right for a page that
+  // has received no command. A gallery state IS a command: a driver that fell
+  // through played confetti where a family drawing belongs.
+  assert.equal(lit(animFrame({ v: 1, kind: 'gallery', interval: 5 }, 1791998675.5)), 0);
+  // The demo still answers a fresh page.
+  assert.ok(lit(animFrame({ v: 1, kind: 'demo' }, 1791998675.5)) > 0);
+});

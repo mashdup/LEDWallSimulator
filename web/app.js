@@ -759,6 +759,57 @@ let cScroller = null;
 let cPassMs = 0;
 let cPushing = false;
 
+// The gallery, app-side. The entries live on the server (GET /drawings) and
+// which one is showing is floor(serverTime / interval) % n - the same pure
+// arithmetic content.html uses, so this tab, a content tab, and a page loaded
+// mid-cycle all land on the same drawing. animFrame cannot resolve it (this
+// module never fetches), and its default branch is the demo: left alone, a
+// driver in gallery mode plays confetti where a family drawing belongs.
+const cGallery = { metas: [], fetchedAt: 0, cache: new Map(), inflight: null, pending: new Set() };
+
+function cGalleryRefresh(force = false) {
+  if (cGallery.inflight !== null) return cGallery.inflight;
+  if (!force && Date.now() - cGallery.fetchedAt < 2000) return Promise.resolve();
+  cGallery.inflight = fetch('/drawings', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : []))
+    .then((metas) => {
+      cGallery.metas = Array.isArray(metas) ? metas : [];
+      cGallery.fetchedAt = Date.now();
+    }, () => {
+      // Server down: keep cycling the list we already have.
+    })
+    .then(() => { cGallery.inflight = null; });
+  return cGallery.inflight;
+}
+
+function cGalleryFetch(id) {
+  if (cGallery.cache.has(id) || cGallery.pending.has(id)) return;
+  cGallery.pending.add(id);
+  fetch(`/drawings/${id}`, { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((e) => {
+      if (e !== null && typeof e.pixels === 'string') cGallery.cache.set(id, e.pixels);
+    }, () => {
+      /* not cached: the next tick retries */
+    })
+    .then(() => { cGallery.pending.delete(id); });
+}
+
+/** The state to render this tick: the drawing the shared clock points at. */
+function cGalleryState(tSec) {
+  cGalleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
+  const n = cGallery.metas.length;
+  if (n === 0) return { kind: 'clear' };
+  const idx = Math.floor((tSec * 1000) / ((cState.interval ?? 5) * 1000)) % n;
+  const meta = cGallery.metas[idx];
+  const hex = cGallery.cache.get(meta.id);
+  if (hex === undefined) {
+    cGalleryFetch(meta.id);
+    return { kind: 'clear' }; // dark this tick; the pixels land on the next one
+  }
+  return { kind: 'pic', pixels: hex };
+}
+
 async function pollContent() {
   try {
     const r = await fetch('/content', { cache: 'no-store' });
@@ -770,6 +821,9 @@ async function pollContent() {
       cRev = j.rev;
       cState = j.state;
       cScroller = null;
+      // Entering the gallery: pull the list now, do not wait out the 2 s
+      // refresh window, so the first drawing shows within one poll.
+      if (j.state.kind === 'gallery') cGalleryRefresh(true);
       if (j.state.kind === 'text') {
         const src = new Banner({ fallback: j.state.text, color: j.state.color ?? '#ffffff' });
         cScroller = new Scroller({
@@ -805,6 +859,8 @@ function pushContentFrame() {
     cScroller.seek(frac * cScroller.period);
     cScroller.render(cPanel);
     bytes = cPanel.pixels;
+  } else if (cState.kind === 'gallery') {
+    bytes = animFrame(cGalleryState(tSec), tSec);
   } else {
     bytes = animFrame(cState, tSec);
   }
@@ -888,6 +944,8 @@ function mirrorContent(j) {
   const s = j.state;
   const what = s.kind === 'text' ? `text: ${String(s.text).slice(0, 32)}`
     : s.kind === 'anim' ? s.name
+    : s.kind === 'pic' ? 'drawing'
+    : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s · ${cGallery.metas.length} drawings`
     : s.kind;
   setOutput($('contentOut'), `server rev ${j.rev} - showing: ${what}`);
   for (const b of $('contentAnims').children) {

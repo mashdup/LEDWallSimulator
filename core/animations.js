@@ -16,6 +16,8 @@
  * chaotic jumps. 'clock' is the one animation that must see the raw epoch.
  */
 
+import { GRID, pixelsFromHex } from './drawings.js';
+
 const ORANGE = [255, 136, 0];
 const GREEN = [0, 255, 102];
 
@@ -59,7 +61,14 @@ export function parseHex(css) {
 
 /**
  * animFrame(state, tRaw, grid) -> Uint8Array(grid*grid*3) flat RGB.
- * state is a protocol message: anim{name}, fill{color}, clear, rect, demo.
+ * state is a protocol message: anim{name}, fill{color}, clear, rect, demo,
+ * pic{pixels}, gallery{interval}.
+ *
+ * The default branch is the DEMO, on purpose: a renderer that has just
+ * loaded, with no command sent yet, shows something alive. That is also why
+ * 'gallery' returns black here rather than falling through - a gallery state
+ * is legal, and a driver that plays the demo in gallery mode is showing
+ * confetti where a family drawing belongs.
  */
 export function animFrame(state, tRaw, grid = 20) {
   const px = new Uint8Array(grid * grid * 3);
@@ -89,6 +98,23 @@ export function animFrame(state, tRaw, grid = 20) {
     }
     case 'text':
       return px; // the banner pipeline owns text; see the app's Scroller path
+    case 'pic': {
+      // A user drawing: RGBA on the wire, RGB on the panel. A cell with a=0
+      // is "not used", and the wall's black is exactly that - zero.
+      const rgba = grid === GRID ? pixelsFromHex(state.pixels) : null;
+      if (rgba === null) return px;
+      for (let i = 0; i < grid * grid; i++) {
+        px[i * 3] = rgba[i * 4];
+        px[i * 3 + 1] = rgba[i * 4 + 1];
+        px[i * 3 + 2] = rgba[i * 4 + 2];
+      }
+      return px;
+    }
+    case 'gallery':
+      // Which entry is showing is a function of the server clock AND the
+      // server's drawing list, so the driver resolves it to a pic state (see
+      // app.js / content.html); this module never fetches.
+      return px;
     default:
       break;
   }
