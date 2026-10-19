@@ -1,11 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
-import {mkdtempSync, rmSync} from 'node:fs';
-import {tmpdir} from 'node:os';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
-import {findChrome} from '../tools/capture.js';
-import {freePort, startServe} from './harness.js';
+import { findChrome } from '../tools/capture.js';
+import { freePort, startServe, openBrowser, waitForValue as waitFor, dropProfile } from './harness.js';
 
 /**
  * Content sync through the server - the only topology that reaches every
@@ -27,63 +26,6 @@ import {freePort, startServe} from './harness.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function waitFor(what, budgetMs = 15000) {
-  const deadline = Date.now() + budgetMs;
-  for (;;) {
-    const v = await what();
-    if (v) return v;
-    if (Date.now() > deadline) throw new Error(`timeout waiting for ${what.label ?? 'condition'}`);
-    await sleep(150);
-  }
-}
-
-class Cdp {
-  constructor(ws) {
-    this.ws = ws;
-    this.id = 0;
-    this.pending = new Map();
-    ws.onmessage = (e) => {
-      const m = JSON.parse(e.data);
-      if (m.id && this.pending.has(m.id)) {
-        const p = this.pending.get(m.id);
-        this.pending.delete(m.id);
-        m.error ? p.rej(new Error(`${m.error.message}`)) : p.res(m.result);
-      }
-    };
-  }
-
-  static async open(url) {
-    const ws = new WebSocket(url);
-    await new Promise((res, rej) => {
-      ws.onopen = res;
-      ws.onerror = () => rej(new Error('CDP websocket failed'));
-    });
-    return new Cdp(ws);
-  }
-
-  send(method, params = {}, sessionId) {
-    return new Promise((res, rej) => {
-      const id = ++this.id;
-      this.pending.set(id, {res, rej});
-      this.ws.send(JSON.stringify({id, method, params, ...(sessionId ? {sessionId} : {})}));
-    });
-  }
-
-  async openTab(url) {
-    const {targetId} = await this.send('Target.createTarget', {url});
-    const {sessionId} = await this.send('Target.attachToTarget', {targetId, flatten: true});
-    await this.send('Runtime.enable', {}, sessionId);
-    return sessionId;
-  }
-
-  async eval(sessionId, expression) {
-    const r = await this.send('Runtime.evaluate', {expression, returnByValue: true}, sessionId);
-    if (r.exceptionDetails) {
-      throw new Error('page threw: ' + (r.exceptionDetails.exception?.description ?? r.exceptionDetails.text));
-    }
-    return r.result.value;
-  }
-}
 
 test('GET /content starts at the demo state', async () => {
   const serve = await startServe(await freePort());
@@ -181,30 +123,11 @@ test('two real browser tabs agree on the content after one POST', async () => {
   const serve = await startServe(await freePort());
   const dbgPort = await freePort();
   const profile = mkdtempSync(`${tmpdir()}\omp-sync-`);
-  const proc = spawn(
-    chrome,
-    [
-      ...(chrome.includes('headless-shell') ? [] : ['--headless=new']),
-      '--no-sandbox',
-      '--no-first-run',
-      '--disable-gpu',
-      `--remote-debugging-port=${dbgPort}`,
-      `--user-data-dir=${profile}`,
-      'about:blank',
-    ],
-    {stdio: 'ignore'},
-  );
+  let proc = null;
 
   try {
-    const version = await waitFor(async () => {
-      try {
-        const r = await fetch(`http://127.0.0.1:${dbgPort}/json/version`);
-        return r.ok ? await r.json() : null;
-      } catch {
-        return null;
-      }
-    });
-    const cdp = await Cdp.open(version.webSocketDebuggerUrl);
+    const { proc: browser, cdp } = await openBrowser(chrome, dbgPort, profile);
+    proc = browser;
 
     // Two independent renderers of the same page - the human's tab and the
     // capture browser are no different: both are just instances polling.
@@ -271,13 +194,9 @@ test('two real browser tabs agree on the content after one POST', async () => {
     const ctl = await cdp.openTab(`${serve.base}/control.html`);
     assert.match(await waitFor(statusIs(ctl, /rev \d+ · plasma/, 'control mirrors server')), /rev \d+ · plasma/);
   } finally {
-    proc.kill();
+    if (proc !== null) proc.kill();
     await serve.stop();
-    try {
-      rmSync(profile, {recursive: true, force: true, maxRetries: 12, retryDelay: 150});
-    } catch {
-      /* leftover temp dir; nothing the assertions depend on */
-    }
+    dropProfile(profile);
   }
 });
 
@@ -294,30 +213,11 @@ test('text state SCROLLS: pushed frames change over time (regression: it sat sti
   const serve = await startServe(await freePort());
   const dbgPort = await freePort();
   const profile = mkdtempSync(`${tmpdir()}\omp-scroll-`);
-  const proc = spawn(
-    chrome,
-    [
-      ...(chrome.includes('headless-shell') ? [] : ['--headless=new']),
-      '--no-sandbox',
-      '--no-first-run',
-      '--disable-gpu',
-      `--remote-debugging-port=${dbgPort}`,
-      `--user-data-dir=${profile}`,
-      'about:blank',
-    ],
-    {stdio: 'ignore'},
-  );
+  let proc = null;
 
   try {
-    const version = await waitFor(async () => {
-      try {
-        const r = await fetch(`http://127.0.0.1:${dbgPort}/json/version`);
-        return r.ok ? await r.json() : null;
-      } catch {
-        return null;
-      }
-    });
-    const cdp = await Cdp.open(version.webSocketDebuggerUrl);
+    const { proc: browser, cdp } = await openBrowser(chrome, dbgPort, profile);
+    proc = browser;
 
     // The app page, switched to the content feed: it is the frame driver.
     // The eval must not race module load: the select exists in the static
@@ -357,12 +257,8 @@ test('text state SCROLLS: pushed frames change over time (regression: it sat sti
     const f2 = await waitFor(frame, 20000);
     assert.ok(!f1.equals(f2), 'pushed text frames are byte-identical over 1.5 s: the banner is not scrolling');
   } finally {
-    proc.kill();
+    if (proc !== null) proc.kill();
     await serve.stop();
-    try {
-      rmSync(profile, {recursive: true, force: true, maxRetries: 12, retryDelay: 150});
-    } catch {
-      /* leftover temp dir; nothing the assertions depend on */
-    }
+    dropProfile(profile);
   }
 });
