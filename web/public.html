@@ -25,10 +25,13 @@
   undo stack, one model, so a drawing cannot mean two things.
 
   Anonymity has a price and it is recorded here: there is no account, so "who"
-  is a name the visitor types and nobody checks. The save cooldown is per
-  device and client-side - it slows one person down, it does not stop them. A
-  wall handed out on this page needs the server to rate-limit, and the owner's
-  editor is where the gallery gets pruned.
+  is a name the visitor types and nobody checks. The real guards are on the
+  server (tools/serve.js): a per-address post limit, a gallery size cap, and a
+  token on DELETE. This page's own cooldown only MIRRORS the server's answer -
+  obeying Retry-After is what makes it a courtesy rather than the limit. The
+  save response carries a per-entry delete secret, kept in this browser's
+  storage, so the guest who posted a drawing can take it back; nobody who did
+  not post it has the secret, and the owner's token is the only other key.
 -->
 <html lang="en">
 <head>
@@ -157,6 +160,9 @@
   .again { font: inherit; font-size: 15px; padding: 12px 20px; border-radius: 12px; cursor: pointer;
            color: var(--ink); background: rgba(255, 255, 255, 0.07); border: 1px solid var(--line); }
   .again:hover { background: rgba(255, 255, 255, 0.12); }
+  .again.undo { border-color: rgba(var(--glow), 0.55); color: rgb(var(--glow)); }
+  .again[hidden] { display: none; }
+  .thanksrow { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
   @media (prefers-reduced-motion: reduce) { .tool, .put { transition: none; } }
 </style>
 </head>
@@ -211,7 +217,10 @@
     <canvas id="thanksArt" width="20" height="20"></canvas>
     <h3 id="thanksTitle">That's on the wall</h3>
     <p id="thanksNote">It joins the gallery in a moment.</p>
-    <button class="again" id="again" type="button">Draw another</button>
+    <div class="thanksrow">
+      <button class="again" id="again" type="button">Draw another</button>
+      <button class="again undo" id="takeback" type="button" hidden>Take it back</button>
+    </div>
   </div>
 </div>
 
@@ -340,6 +349,31 @@ function set(text, ok = true) {
   $('status').classList.toggle('bad', !ok);
 }
 
+// What this browser posted, with the secret the server handed back. The secret
+// is served once, in the save response, and never appears in any GET - so it,
+// not a session, is what lets this guest undo their own drawing.
+const MINE_KEY = 'ledwall-public-mine';
+function loadMine() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MINE_KEY) ?? '[]');
+    return Array.isArray(raw)
+      ? raw.filter((m) => typeof m?.id === 'string' && typeof m?.secret === 'string').slice(0, 10)
+      : [];
+  } catch { return []; }
+}
+function saveMine(list) {
+  try { localStorage.setItem(MINE_KEY, JSON.stringify(list)); } catch { /* private mode */ }
+}
+let mine = loadMine();
+let shownId = null;
+
+/** Turn a refusal into a sentence a guest can act on. */
+function why(status, text) {
+  if (status === 429) return text || 'one at a time';
+  if (status === 507) return 'the gallery is full - ask the owner to clear it';
+  return `the wall did not take it (HTTP ${status})`;
+}
+
 $('save').addEventListener('click', async () => {
   const left = cooldownLeft();
   if (editor.isEmpty()) { set('Draw something first.'); return; }
@@ -351,21 +385,53 @@ $('save').addEventListener('click', async () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: $('name').value, pixels: pixelsToHex(editor.pixels) }),
     });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      // The server is the authority on the pause, so obey its Retry-After: the
+      // client cooldown becomes a mirror of the real limit instead of a guess
+      // at one, and a page that ignores it is the flood the limit is for.
+      if (r.status === 429) {
+        const secs = Number(r.headers.get('retry-after'));
+        if (Number.isFinite(secs) && secs > 0) lastSaveAt = Date.now() - (COOLDOWN_MS - secs * 1000);
+      }
+      set(why(r.status, (await r.text()).trim()), false);
+      $('save').disabled = editor.isEmpty() || cooldownLeft() > 0;
+      return;
+    }
     const j = await r.json();
     lastSaveAt = Date.now();
-    showThanks(j.name || 'unsigned');
+    mine = [{ id: j.id, secret: j.secret }, ...mine].slice(0, 10);
+    saveMine(mine);
+    showThanks(j.name || 'unsigned', j.id);
     editor.clear();
     $('name').value = '';
     set('on the wall');
   } catch (err) {
-    set(`the wall did not take it: ${err.message}`, false);
-    $('save').disabled = false;
+    set(`the wall did not answer: ${err.message}`, false);
+    $('save').disabled = editor.isEmpty();
+  }
+});
+
+// Take it back: the per-entry secret opens exactly this entry.
+$('takeback').addEventListener('click', async () => {
+  const entry = mine.find((m) => m.id === shownId);
+  if (entry === undefined) return;
+  try {
+    const r = await fetch(`/drawings/${entry.id}`, {
+      method: 'DELETE', headers: { 'x-wall-delete': entry.secret },
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    mine = mine.filter((m) => m.id !== entry.id);
+    saveMine(mine);
+    $('thanks').hidden = true;
+    $('takeback').hidden = true;
+    set('taken back - it is off the wall');
+  } catch (err) {
+    set(`could not take it back: ${err.message}`, false);
   }
 });
 
 const thanksArt = $('thanksArt').getContext('2d');
-function showThanks(name) {
+function showThanks(name, id) {
   // The bytes are copied before the canvas is cleared: the thank-you card
   // shows the drawing that was just saved, not the empty grid it became.
   const saved = editor.pixels.slice();
@@ -374,6 +440,9 @@ function showThanks(name) {
   img.data.set(saved);
   thanksArt.putImageData(img, 0, 0);
   $('thanksTitle').textContent = name === 'unsigned' ? "That's on the wall" : `Thanks, ${name}`;
+  $('thanksNote').textContent = 'It joins the gallery in a moment.';
+  shownId = id;
+  $('takeback').hidden = false;
   $('thanks').hidden = false;
 }
 $('again').addEventListener('click', () => { $('thanks').hidden = true; $('grid').focus({ preventScroll: true }); });

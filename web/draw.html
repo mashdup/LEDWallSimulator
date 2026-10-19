@@ -20,6 +20,11 @@
     Save     -> POST /drawings               add it to the gallery the wall cycles
     Gallery  -> POST /content {kind:'gallery', interval}
 
+  Removing an entry needs the owner token (X-Wall-Owner): the server prints it
+  at startup and keeps it in data/owner-token.txt. The field below remembers it
+  per browser, so the owner types it once. A guest page has no token and cannot
+  prune anything - see web/public.html.
+
   Touch-first: the grid is a pointer-events surface with touch-action:none,
   so a phone draws with a finger and does not scroll the page mid-stroke.
 -->
@@ -111,6 +116,9 @@
 
 <div class="col">
   <label>Gallery (<span id="count">0</span>) — newest at the bottom, tap to show, ✕ to remove</label>
+  <div class="row">
+    <input id="owner" type="password" size="34" placeholder="owner token (server prints it at startup)" spellcheck="false" autocomplete="off">
+  </div>
   <div class="gallery" id="entries"></div>
 </div>
 
@@ -247,6 +255,28 @@ $('gallery').addEventListener('click', async () => {
   }
 });
 
+// ---- the owner token -------------------------------------------------------
+// The server gates DELETE: the owner token prunes the whole gallery, and the
+// per-entry secret (served once to whoever posted it) opens one entry. This is
+// the owner's page, so it uses the token, kept per browser in localStorage -
+// typed once, and the server prints it on every start.
+const OWNER_KEY = 'ledwall-owner-token';
+function ownerToken() {
+  try { return localStorage.getItem(OWNER_KEY) ?? ''; } catch { return $('owner').value; }
+}
+$('owner').value = ownerToken();
+$('owner').addEventListener('input', () => {
+  try { localStorage.setItem(OWNER_KEY, $('owner').value); } catch { /* private mode */ }
+});
+
+/** A refusal, in words the owner can act on. */
+function deleteWhy(status) {
+  if (status === 401) return 'owner token needed — the server prints it at startup';
+  if (status === 403) return 'that is not the owner token';
+  if (status === 404) return 'that drawing is already gone';
+  return `HTTP ${status}`;
+}
+
 // ---- the gallery list ------------------------------------------------------
 // Thumbnails are drawn from the stored bytes, not from a server-rendered
 // image: the same pixels, the same core decoder, so a thumbnail that looks
@@ -282,8 +312,11 @@ async function loadGallery() {
       del.title = 'remove';
       del.addEventListener('click', async () => {
         try {
-          const r = await fetch(`/drawings/${m.id}`, { method: 'DELETE' });
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const r = await fetch(`/drawings/${m.id}`, {
+            method: 'DELETE', headers: { 'x-wall-owner': ownerToken() },
+          });
+          if (!r.ok) { set(`remove: ${deleteWhy(r.status)}`, false); return; }
+          set('removed');
           loadGallery();
         } catch (err) {
           set(`delete failed: ${err.message}`, false);

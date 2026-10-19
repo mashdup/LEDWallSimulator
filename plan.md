@@ -150,3 +150,44 @@ visitor types and nobody checks. The 20 s save cooldown is per device and
 client-side — it slows one excited person down and is not a security boundary.
 A wall handed out on this page needs a server-side rate limit, and the owner's
 list is the pruning tool.
+
+### 7.2 The guest guards (server-side)
+
+A page handed to strangers needs limits it cannot be talked out of, so every
+guard is in `tools/serve.js`, not in the page:
+
+| guard | flag | default |
+| --- | --- | --- |
+| minimum gap between `POST /drawings` per address | `--rate-spacing <ms>` | 10 000 |
+| posts per window per address (burst) | `--rate-burst <n>` over `--rate-window <ms>` | 6 / 60 000 |
+| gallery size cap | `--max-drawings <n>` | 200 |
+| the delete key | `--owner-token <hex>` | random, saved to `data/owner-token.txt`, printed at start |
+
+*The address is the socket address.* `X-Forwarded-For` is forged by exactly the
+client the limit exists for, and this server is loopback-bound with no proxy in
+front of it that would set the header truthfully. A **rejected** post records
+nothing: if it did, hammering would push one's own lockout further out, so a
+flood would be its own reward. The gate runs before the body is read, so a
+refusal does not make the server absorb 3.3 KB it is going to throw away. A full
+gallery answers **507**, not a fake success, and a rate refusal is a **429 with
+`Retry-After`** — which the guest page obeys, so its own cooldown is a mirror of
+the real limit rather than a guess at one.
+
+*Deletes need a key, and there are two, with different reach.* The **owner
+token** (`X-Wall-Owner`) prunes the whole gallery; `draw.html` keeps it per
+browser and the server prints it at startup. The **entry secret**
+(`X-Wall-Delete`) is generated at POST time, returned **once** in the save
+response, and opens exactly that entry — so a guest can take their own drawing
+back and nobody else's. `GET /drawings/<id>` serves a public view that strips
+it: the list is public, so a served secret would mean every visitor can delete
+every drawing in two requests. Auth is checked before the id lookup, so an
+unauthenticated caller is told *no* before it is told whether an id exists. An
+empty `--owner-token` **disables** owner auth rather than becoming a shared
+secret of `""`.
+
+*What this does not do:* no accounts, so "who" is still a name the visitor
+types; the address limit is one per device behind one address, so a determined
+flood from a network is not stopped, only slowed; and the gallery is still
+public. This is the honest shape of a self-hosted wall with a QR code in front
+of it — enough that an excited family cannot fill the wall, and the owner can
+always clear it.
