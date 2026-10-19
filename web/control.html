@@ -22,6 +22,8 @@
   button:hover { background: #333; }
   button.on { background: #264; border-color: #6fa; color: #eaffea; }
   input[type=text] { font: inherit; padding: 8px; background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; }
+  input[type=number] { font: inherit; padding: 6px; width: 4.5em; background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; }
+  a { color: #8cf; }
   #status { font-family: ui-monospace, monospace; color: #6f6; white-space: pre; }
   .hint { color: #888; max-width: 560px; }
   code { color: #aaa; }
@@ -53,6 +55,12 @@
   <button data-anim="plasma" type="button">Plasma</button>
   <button data-anim="bars" type="button">Bars</button>
   <button data-anim="clock" type="button">Clock</button>
+</div>
+
+<div class="row">
+  <a href="./draw.html"><button type="button">Draw…</button></a>
+  <label>Gallery every <input id="interval" type="number" min="1" max="600" value="8"> s</label>
+  <button id="gallery" type="button">Start gallery</button>
 </div>
 
 <p><output id="status">connecting…</output></p>
@@ -94,6 +102,15 @@ for (const b of document.querySelectorAll('button[data-anim]')) {
   });
 }
 
+// The gallery: the entries live on the server, and which one is showing is a
+// pure function of the shared server clock, so this button only sets the
+// cadence - every content page (and the wall) picks the same drawing.
+$('gallery').addEventListener('click', () => {
+  const interval = Math.max(1, Math.min(600, Number($('interval').value) || 8));
+  $('interval').value = String(interval);
+  send(makeMessage('gallery', { interval }), `gallery every ${interval} s`);
+});
+
 // Enter in the text box sends, like a ticker.
 $('text').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') $('send').click();
@@ -109,8 +126,11 @@ async function watch() {
     const s = j.state;
     const what = s.kind === 'text' ? `text: ${s.text.slice(0, 32)}`
       : s.kind === 'anim' ? s.name
+      : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s · ${galleryCount} drawings`
+      : s.kind === 'pic' ? 'drawing (one shot)'
       : s.kind;
     set(`server rev ${j.rev} · ${what}`);
+    if (s.kind === 'gallery') countDrawings();
     // Light up the animation button that matches the server's current state,
     // so any control tab shows what any other tab (or the wall) is showing.
     for (const o of document.querySelectorAll('button[data-anim]')) {
@@ -120,6 +140,19 @@ async function watch() {
     set('server unreachable', false);
   }
 }
+// The gallery count, fetched while the wall is in gallery mode: the status
+// line is more useful as "every 8 s · 17 drawings" than as a bare kind name.
+let galleryCount = '?';
+
+async function countDrawings() {
+  try {
+    const r = await fetch('/drawings', { cache: 'no-store' });
+    if (r.ok) galleryCount = String((await r.json()).length);
+  } catch {
+    galleryCount = '?';
+  }
+}
+
 setInterval(watch, 250);
 watch();
 

@@ -15,12 +15,16 @@
  *   rect    {x, y, w, h, color}    draw a block of cells
  *   text    {text, color?, fps?, step?, loop?}   scroll a banner
  *   anim    {name: 'demo' | 'off'} start/stop the page's own demo
+ *   pic     {pixels}  one 20x20 user drawing (hex RGBA wire form)
+ *   gallery {interval?}  cycle the saved drawings on the server
  */
+
+import { isPixelHex } from './drawings.js';
 
 export const CONTENT_CHANNEL = 'ledwall-content';
 export const CONTENT_PROTOCOL_V = 1;
 
-export const CONTENT_KINDS = ['clear', 'fill', 'rect', 'text', 'anim'];
+export const CONTENT_KINDS = ['clear', 'fill', 'rect', 'text', 'anim', 'pic', 'gallery'];
 
 /**
  * Named animations the content pages know how to draw. Every one is a pure
@@ -101,6 +105,23 @@ export function parseMessage(data) {
       return ANIM_NAMES.includes(data.name)
         ? {v: CONTENT_PROTOCOL_V, kind: 'anim', name: data.name}
         : null;
+    case 'pic':
+      // The drawing itself rides in the message: a driver tab can show a
+      // picture on the wall without it ever being saved to the gallery.
+      return isPixelHex(data.pixels)
+        ? {v: CONTENT_PROTOCOL_V, kind: 'pic', pixels: data.pixels.toLowerCase()}
+        : null;
+    case 'gallery': {
+      // The list lives on the server (GET /drawings); the message carries
+      // only the cadence. The renderer picks the entry from the shared
+      // server clock, so every instance shows the same drawing.
+      const m = {v: CONTENT_PROTOCOL_V, kind: 'gallery'};
+      if (data.interval !== undefined) {
+        if (!Number.isInteger(data.interval) || data.interval < 1 || data.interval > 600) return null;
+        m.interval = data.interval;
+      }
+      return m;
+    }
     default:
       return null;
   }

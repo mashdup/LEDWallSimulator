@@ -1,0 +1,449 @@
+<!doctype html>
+<!--
+  draw.html - the 20x20 drawing app: anyone can draw, then send.
+
+  One entry per drawing, no accounts, no moderation: this is a self-hosted
+  family wall, so the entry flow is "open the page, draw, press send".
+
+  The model is core/drawings.js (20x20 RGBA, alpha = "not used"), the same
+  module the server store and the content renderer use - so what the editor
+  holds is byte-for-byte what the wall paints. The editor paints a black
+  background under the grid: transparent cells read as OFF, exactly as they
+  will on the wall, and a black fill is a deliberate choice, not a surprise.
+
+  Two exits:
+    Send     -> POST /content {kind:'pic'}   show this drawing right now
+    Save     -> POST /drawings               add it to the gallery the wall cycles
+
+  Touch-first: the grid is a pointer-events surface with touch-action:none,
+  so a phone draws with a finger and does not scroll the page mid-stroke.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Draw for the LED wall</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 12px; background: #0a0a0a; color: #ccc; font: 14px/1.5 system-ui, sans-serif; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .hint { color: #888; max-width: 640px; }
+  .wrap { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  #grid { display: block; width: min(92vw, 480px); height: min(92vw, 480px); background: #000;
+          border: 1px solid #333; border-radius: 4px; touch-action: none; cursor: crosshair; }
+  #preview { display: block; width: 160px; height: 160px; background: #000; border: 1px solid #333; border-radius: 4px; }
+  .col { display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  button { font: inherit; padding: 8px 12px; background: #222; color: #ccc; border: 1px solid #444; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #333; }
+  button.on { background: #264; border-color: #6fa; color: #eaffea; }
+  button.big { padding: 10px 16px; font-size: 15px; }
+  input[type=text] { font: inherit; padding: 8px; background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; }
+  input[type=number] { font: inherit; padding: 6px; width: 4.5em; background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; }
+  input[type=color] { width: 44px; height: 34px; padding: 0; background: #111; border: 1px solid #444; border-radius: 6px; }
+  .swatch { width: 26px; height: 26px; padding: 0; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
+  .swatch.on { outline: 2px solid #6fa; }
+  #status { font-family: ui-monospace, monospace; color: #6f6; white-space: pre-wrap; }
+  #status.bad { color: #f66; }
+  label { color: #999; }
+  .gallery { display: flex; flex-direction: column; gap: 4px; max-width: 480px; }
+  .entry { display: flex; gap: 8px; align-items: center; }
+  .entry canvas { width: 40px; height: 40px; background: #000; border: 1px solid #333; image-rendering: pixelated; }
+  .entry .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entry button { padding: 2px 8px; font-size: 12px; }
+  code { color: #aaa; }
+</style>
+</head>
+<body>
+<h1>Draw for the wall</h1>
+<p class="hint">
+  20 × 20 — one square is one LED. Empty squares stay dark on the wall.
+  Draw, then <b>Send</b> to show it now, or <b>Save</b> to add it to the
+  gallery the wall cycles. <a href="./control.html">control</a> ·
+  <a href="./content.html">content</a>
+</p>
+
+<div class="wrap">
+  <canvas id="grid" width="640" height="640" aria-label="20 by 20 drawing grid"></canvas>
+
+  <div class="col">
+    <div class="row" id="tools">
+      <button data-tool="pencil" class="on" type="button">Pencil</button>
+      <button data-tool="eraser" type="button">Eraser</button>
+      <button data-tool="fill" type="button">Fill</button>
+    </div>
+
+    <div class="row">
+      <input id="color" type="color" value="#ff3355" aria-label="pick a color">
+      <div class="row" id="palette"></div>
+    </div>
+    <div class="row" id="recent" aria-label="recently used colors"></div>
+
+    <div class="row">
+      <button id="undo" type="button">Undo</button>
+      <button id="clear" type="button">Clear</button>
+    </div>
+
+    <div class="row">
+      <button id="send" class="big on" type="button">Send to wall</button>
+      <input id="name" type="text" size="12" maxlength="40" placeholder="name (optional)" spellcheck="false">
+      <button id="save" class="big" type="button">Save to gallery</button>
+    </div>
+
+    <div class="row">
+      <label>Gallery every <input id="interval" type="number" min="1" max="600" value="8"> s</label>
+      <button id="gallery" type="button">Start gallery</button>
+    </div>
+
+    <div class="col">
+      <label>Wall preview (what the wall will show)</label>
+      <canvas id="preview" width="20" height="20"></canvas>
+    </div>
+
+    <p><output id="status">ready</output></p>
+  </div>
+</div>
+
+<div class="col">
+  <label>Gallery (<span id="count">0</span>) — newest at the bottom, tap to show, ✕ to remove</label>
+  <div class="gallery" id="entries"></div>
+</div>
+
+<script type="module">
+import { GRID, emptyPixels, pixelsToHex, pixelsFromHex, floodFill, parseColor } from '../core/drawings.js';
+import { makeMessage } from '../core/content-protocol.js';
+
+const $ = (id) => document.getElementById(id);
+
+// ---- the model -------------------------------------------------------------
+// pixels is core's flat RGBA grid. The editor never keeps a parallel
+// representation: every render, every send, and every save reads these bytes,
+// so the wall cannot disagree with the screen about what was drawn.
+let pixels = emptyPixels();
+let tool = 'pencil';
+let color = '#ff3355';
+
+const CELL = 32; // 20 * 32 = 640: the canvas is a 1:1 map of LED cells
+const grid = $('grid');
+const gctx = grid.getContext('2d');
+const preview = $('preview');
+const pctx = preview.getContext('2d');
+preview.style.imageRendering = 'pixelated';
+
+// ---- rendering -------------------------------------------------------------
+function rgbaCss(i) {
+  return `rgba(${pixels[i * 4]},${pixels[i * 4 + 1]},${pixels[i * 4 + 2]},${(pixels[i * 4 + 3] / 255).toFixed(3)})`;
+}
+
+function render() {
+  // Black first: transparent cells must read as OFF, exactly as on the wall.
+  gctx.fillStyle = '#000';
+  gctx.fillRect(0, 0, grid.width, grid.height);
+  for (let i = 0; i < GRID * GRID; i++) {
+    if (pixels[i * 4 + 3] === 0) continue;
+    gctx.fillStyle = rgbaCss(i);
+    gctx.fillRect((i % GRID) * CELL, ((i / GRID) | 0) * CELL, CELL, CELL);
+  }
+  gctx.strokeStyle = 'rgba(255,255,255,0.10)';
+  gctx.lineWidth = 1;
+  for (let k = 1; k < GRID; k++) {
+    gctx.beginPath(); gctx.moveTo(k * CELL + 0.5, 0); gctx.lineTo(k * CELL + 0.5, grid.height); gctx.stroke();
+    gctx.beginPath(); gctx.moveTo(0, k * CELL + 0.5); gctx.lineTo(grid.width, k * CELL + 0.5); gctx.stroke();
+  }
+  renderPreview();
+}
+
+// The preview is the wall's own resolution (20x20) scaled up by CSS with
+// pixelated rendering: the same "what the wall sees" check the content page
+// does, without a round trip to the server.
+function renderPreview() {
+  pctx.clearRect(0, 0, GRID, GRID);
+  const img = pctx.createImageData(GRID, GRID);
+  img.data.set(pixels);
+  pctx.putImageData(img, 0, 0);
+}
+
+// ---- editing ---------------------------------------------------------------
+const undoStack = [];
+function pushUndo() {
+  undoStack.push(pixels.slice());
+  if (undoStack.length > 40) undoStack.shift();
+}
+
+function setCell(x, y, rgba) {
+  if (x < 0 || y < 0 || x >= GRID || y >= GRID) return;
+  const p = (y * GRID + x) * 4;
+  pixels[p] = rgba[0]; pixels[p + 1] = rgba[1]; pixels[p + 2] = rgba[2]; pixels[p + 3] = rgba[3];
+}
+
+// A finger on a phone moves in big steps between pointer events; without a
+// line between the last cell and this one, diagonal drags leave gaps.
+function lineTo(x, y, rgba) {
+  let x0 = last.x, y0 = last.y;
+  const dx = Math.abs(x - x0), dy = Math.abs(y - y0);
+  const sx = x0 < x ? 1 : -1, sy = y0 < y ? 1 : -1;
+  let err = dx - dy;
+  for (;;) {
+    setCell(x0, y0, rgba);
+    if (x0 === x && y0 === y) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 < dx) { err += dx; y0 += sy; }
+  }
+}
+
+let drawing = false;
+const last = { x: -1, y: -1 };
+
+function cellAt(ev) {
+  const r = grid.getBoundingClientRect();
+  const scale = grid.width / r.width;
+  return [
+    Math.floor(((ev.clientX - r.left) * scale) / CELL),
+    Math.floor(((ev.clientY - r.top) * scale) / CELL),
+  ];
+}
+
+function apply(x, y) {
+  const rgba = tool === 'eraser' ? [0, 0, 0, 0] : parseColor(color);
+  if (tool === 'fill') {
+    floodFill(pixels, x, y, rgba);
+  } else if (last.x >= 0 && (x !== last.x || y !== last.y)) {
+    lineTo(x, y, rgba);
+  } else {
+    setCell(x, y, rgba);
+  }
+  last.x = x; last.y = y;
+  render();
+}
+
+grid.addEventListener('pointerdown', (ev) => {
+  ev.preventDefault();
+  grid.setPointerCapture(ev.pointerId);
+  pushUndo();
+  drawing = true;
+  last.x = -1; last.y = -1;
+  const [x, y] = cellAt(ev);
+  apply(x, y);
+});
+grid.addEventListener('pointermove', (ev) => {
+  if (!drawing || tool === 'fill') return; // a fill is one tap, not a drag
+  const [x, y] = cellAt(ev);
+  if (x === last.x && y === last.y) return;
+  apply(x, y);
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  grid.addEventListener(type, () => { drawing = false; last.x = -1; last.y = -1; });
+}
+
+$('undo').addEventListener('click', () => {
+  if (undoStack.length === 0) return;
+  pixels = undoStack.pop();
+  render();
+});
+$('clear').addEventListener('click', () => {
+  pushUndo();
+  pixels = emptyPixels();
+  render();
+});
+
+for (const b of document.querySelectorAll('#tools button')) {
+  b.addEventListener('click', () => {
+    tool = b.dataset.tool;
+    for (const o of document.querySelectorAll('#tools button')) o.classList.toggle('on', o === b);
+  });
+}
+
+// ---- colors ----------------------------------------------------------------
+// Full RGB via the native picker, plus a fixed quick palette for one-tap
+// family drawing, plus the last colors used (localStorage, per device —
+// there are no users here, so "recent" is whatever this phone drew with).
+const PALETTE = [
+  '#000000', '#ffffff', '#808080', '#c0c0c0',
+  '#ff0000', '#ff6600', '#ffcc00', '#ffff00',
+  '#66ff33', '#00ff88', '#00ffff', '#3399ff',
+  '#0044ff', '#aa00ff', '#ff00ff', '#ff66aa',
+  '#7b3f00', '#5cd6ff',
+];
+
+const RECENT_KEY = 'ledwall-draw-recent';
+const RECENT_MAX = 10;
+
+function loadRecent() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
+    return Array.isArray(raw) ? raw.filter((c) => parseColor(c) !== null).slice(0, RECENT_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+
+let recent = loadRecent();
+
+function saveRecent() {
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(recent));
+  } catch {
+    /* private mode: recents are a convenience, not a requirement */
+  }
+}
+
+// applyColor changes the working color only; setColor also commits it to the
+// recents row. Dragging the native picker fires input continuously, and one
+// drag would otherwise fill recents with every shade it passed through.
+function applyColor(css) {
+  const rgba = parseColor(css);
+  if (rgba === null) return false;
+  color = '#' + rgba.slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('');
+  $('color').value = color;
+  renderSwatches();
+  return true;
+}
+
+function setColor(css) {
+  if (!applyColor(css)) return;
+  recent = [color, ...recent.filter((c) => c !== color)].slice(0, RECENT_MAX);
+  saveRecent();
+}
+
+function renderSwatches() {
+  const mk = (host, list) => {
+    host.textContent = '';
+    for (const c of list) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'swatch' + (c === color ? ' on' : '');
+      b.style.background = c;
+      b.title = c;
+      b.setAttribute('aria-label', `color ${c}`);
+      b.addEventListener('click', () => setColor(c));
+      host.appendChild(b);
+    }
+  };
+  mk($('palette'), PALETTE);
+  mk($('recent'), recent);
+}
+
+$('color').addEventListener('input', () => applyColor($('color').value));
+$('color').addEventListener('change', () => setColor($('color').value));
+
+// ---- server actions --------------------------------------------------------
+function set(text, ok = true) {
+  const out = $('status');
+  out.textContent = text;
+  out.classList.toggle('bad', !ok);
+}
+
+async function post(url, body, type = 'application/json') {
+  const r = await fetch(url, { method: 'POST', headers: { 'content-type': type }, body });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r;
+}
+
+$('send').addEventListener('click', async () => {
+  try {
+    // The drawing rides in the message: showing a picture needs no server
+    // state beyond the content channel every renderer already polls.
+    await post('/content', JSON.stringify(makeMessage('pic', { pixels: pixelsToHex(pixels) })));
+    set('sent to the wall');
+  } catch (err) {
+    set(`send failed: ${err.message}`, false);
+  }
+});
+
+$('save').addEventListener('click', async () => {
+  try {
+    const r = await post('/drawings', JSON.stringify({ name: $('name').value, pixels: pixelsToHex(pixels) }));
+    const j = await r.json();
+    set(`saved: ${j.name || 'untitled'}`);
+    $('name').value = '';
+    loadGallery();
+  } catch (err) {
+    set(`save failed: ${err.message}`, false);
+  }
+});
+
+$('gallery').addEventListener('click', async () => {
+  const interval = Math.max(1, Math.min(600, Number($('interval').value) || 8));
+  $('interval').value = String(interval);
+  try {
+    await post('/content', JSON.stringify(makeMessage('gallery', { interval })));
+    set(`gallery: every ${interval} s`);
+  } catch (err) {
+    set(`gallery failed: ${err.message}`, false);
+  }
+});
+
+// ---- the gallery list ------------------------------------------------------
+// Thumbnails are drawn from the stored bytes, not from a server-rendered
+// image: the same pixels, the same core decoder, so a thumbnail that looks
+// right IS a drawing that will look right on the wall.
+async function loadGallery() {
+  try {
+    const r = await fetch('/drawings', { cache: 'no-store' });
+    const metas = r.ok ? await r.json() : [];
+    $('count').textContent = String(metas.length);
+    const host = $('entries');
+    host.textContent = '';
+    for (const m of metas) {
+      const row = document.createElement('div');
+      row.className = 'entry';
+      const thumb = document.createElement('canvas');
+      thumb.width = GRID;
+      thumb.height = GRID;
+      const show = document.createElement('button');
+      show.type = 'button';
+      show.textContent = 'Show';
+      show.addEventListener('click', async () => {
+        try {
+          const e = await (await fetch(`/drawings/${m.id}`, { cache: 'no-store' })).json();
+          await post('/content', JSON.stringify(makeMessage('pic', { pixels: e.pixels })));
+          set(`showing: ${m.name || 'untitled'}`);
+        } catch (err) {
+          set(`show failed: ${err.message}`, false);
+        }
+      });
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = '✕';
+      del.title = 'remove';
+      del.addEventListener('click', async () => {
+        try {
+          const r = await fetch(`/drawings/${m.id}`, { method: 'DELETE' });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          loadGallery();
+        } catch (err) {
+          set(`delete failed: ${err.message}`, false);
+        }
+      });
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = m.name || 'untitled';
+      row.append(thumb, name, show, del);
+      host.appendChild(row);
+      // Pixels arrive per entry: 20x20 hex is ~3 KB, and a wall gallery is
+      // dozens of entries, not thousands - fetching them together is fine.
+      fetch(`/drawings/${m.id}`, { cache: 'no-store' })
+        .then((rr) => (rr.ok ? rr.json() : null))
+        .then((e) => {
+          const bytes = e === null ? null : pixelsFromHex(e.pixels);
+          if (bytes === null) return;
+          const tctx = thumb.getContext('2d');
+          const img = tctx.createImageData(GRID, GRID);
+          img.data.set(bytes);
+          tctx.putImageData(img, 0, 0);
+        })
+        .catch(() => {});
+    }
+  } catch {
+    set('gallery list unavailable', false);
+  }
+}
+
+render();
+renderSwatches();
+loadGallery();
+setInterval(loadGallery, 15000); // another tab may have saved while this one was open
+</script>
+</body>
+</html>

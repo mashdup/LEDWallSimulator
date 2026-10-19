@@ -59,6 +59,7 @@
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
 import { Panel, Scroller } from '../core/index.js';
+import { GRID, pixelsFromHex } from '../core/drawings.js';
 import { Banner } from './banner.js';
 /*
  * WALL — the drawing API for this page's canvas, sized to the panel.
@@ -161,12 +162,17 @@ function onState() {
     });
     passMs = scroller.passDurationMs(30);
   }
+  // Entering the gallery: pull the list now, do not wait out the 2 s refresh
+  // window, so the first drawing appears within one poll of the command.
+  if (state.kind === 'gallery') galleryRefresh(true);
   setOutput(describe());
 }
 
 function describe() {
   if (state.kind === 'text') return `rev ${rev} · text: ${state.text.slice(0, 32)}`;
   if (state.kind === 'anim') return `rev ${rev} · ${state.name}`;
+  if (state.kind === 'pic') return `rev ${rev} · pic`;
+  if (state.kind === 'gallery') return `rev ${rev} · gallery`;
   return `rev ${rev} · ${state.kind}`;
 }
 
@@ -210,6 +216,13 @@ const pushCtx = pushCanvas.getContext('2d');
 function pushFrame() {
   if (pushing) return;
   pushing = true;
+  // Clear before drawing: drawImage composites, it does not replace, so a
+  // transparent source region leaves the PREVIOUS frame's pixels behind. On a
+  // page canvas that is invisible (WALL.canvas is cleared every tick), but the
+  // push canvas is shared - without this, a cell that turns off stays lit in
+  // the feed the wall reads, and the wall ghosts every pattern it has ever
+  // shown.
+  pushCtx.clearRect(0, 0, pushCanvas.width, pushCanvas.height);
   pushCtx.drawImage(WALL.canvas, 0, 0, WALL.grid, WALL.grid);
   pushCanvas.toBlob((blob) => {
     if (blob === null) {
@@ -241,6 +254,15 @@ function draw() {
     case 'rect':
       WALL.clear();
       WALL.rect(state.x, state.y, state.w, state.h, state.color);
+      break;
+    case 'pic':
+      // One user drawing, straight off the wire: the editor posts the hex
+      // grid in the message, so a picture needs no server-side gallery.
+      WALL.clear();
+      paintPixels(state.pixels);
+      break;
+    case 'gallery':
+      galleryDraw(t);
       break;
     case 'text': {
       if (scroller === null) return;
@@ -438,6 +460,94 @@ function noise(x, y) {
   const a = n00 + (n10 - n00) * s(xf);
   const b = n01 + (n11 - n01) * s(xf);
   return a + (b - a) * s(yf);
+}
+
+// ---- user drawings ---------------------------------------------------------
+// A drawing is the 20x20 RGBA grid core/drawings.js defines, carried as hex.
+// Alpha is the whole transparency story: a=0 means "not used", so it is
+// skipped and the wall's black shows through - which is also why the editor
+// page paints a black background: what looks empty there is off on the wall.
+
+function paintPixels(hex) {
+  const bytes = pixelsFromHex(hex);
+  if (bytes === null) return; // never drawn on a legal message; belt and braces
+  const ctx = WALL.ctx;
+  for (let i = 0; i < GRID * GRID; i++) {
+    const a = bytes[i * 4 + 3];
+    if (a === 0) continue;
+    const r = bytes[i * 4];
+    const g = bytes[i * 4 + 1];
+    const b = bytes[i * 4 + 2];
+    ctx.fillStyle = a === 255 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${(a / 255).toFixed(3)})`;
+    ctx.fillRect((i % GRID) * WALL.cell, ((i / GRID) | 0) * WALL.cell, WALL.cell, WALL.cell);
+  }
+}
+
+// The gallery: the entries live on the server (GET /drawings), and WHICH
+// one is showing is a pure function of the shared server clock -
+// floor(t / interval) % n - so the wall, a human's tab, and a capture
+// browser that loads fresh mid-cycle all land on the same drawing. The
+// cache is by id, so a new entry never shifts the pixels an id maps to.
+const gallery = { metas: [], fetchedAt: 0, cache: new Map(), inflight: null, pending: new Set(), label: '' };
+
+async function galleryRefresh(force = false) {
+  if (gallery.inflight !== null) return gallery.inflight;
+  if (!force && Date.now() - gallery.fetchedAt < 2000) return;
+  gallery.inflight = fetch('/drawings', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : []))
+    .then((metas) => {
+      gallery.metas = Array.isArray(metas) ? metas : [];
+      gallery.fetchedAt = Date.now();
+    }, () => {
+      // Server down: keep cycling the list we already have.
+    })
+    .then(() => { gallery.inflight = null; });
+  return gallery.inflight;
+}
+
+function galleryIndex(t) {
+  const n = gallery.metas.length;
+  if (n === 0) return -1;
+  const intervalMs = (state.interval ?? 5) * 1000;
+  return Math.floor((t * 1000) / intervalMs) % n;
+}
+
+function galleryDraw(t) {
+  galleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
+  const idx = galleryIndex(t);
+  WALL.clear();
+  if (idx < 0) {
+    if (gallery.label !== 'gallery: empty') {
+      gallery.label = 'gallery: empty';
+      setOutput(gallery.label);
+    }
+    return;
+  }
+  const meta = gallery.metas[idx];
+  const hex = gallery.cache.get(meta.id);
+  if (hex === undefined) {
+    galleryFetch(meta.id);
+    return; // this tick stays black; the pixels land on the next one
+  }
+  paintPixels(hex);
+  const label = `gallery ${idx + 1}/${gallery.metas.length}${meta.name ? ' · ' + meta.name : ''}`;
+  if (label !== gallery.label) {
+    gallery.label = label;
+    setOutput(label);
+  }
+}
+
+function galleryFetch(id) {
+  if (gallery.cache.has(id) || gallery.pending.has(id)) return;
+  gallery.pending.add(id);
+  fetch(`/drawings/${id}`, { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((e) => {
+      if (e !== null && typeof e.pixels === 'string') gallery.cache.set(id, e.pixels);
+    }, () => {
+      /* not cached: the next draw retries */
+    })
+    .then(() => { gallery.pending.delete(id); });
 }
 
 // The panel's flat RGB bytes -> the canvas, one fillRect per lit cell.

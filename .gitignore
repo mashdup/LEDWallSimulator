@@ -27,3 +27,6 @@ desktop.ini
 .wall-profile/
 .bsl-test/
 .wall-electron/
+
+# User drawing entries (the wall gallery): local data, not source
+data/

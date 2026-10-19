@@ -46,6 +46,19 @@ export {
   TYPICAL_GAMMA,
 } from './color.js';
 export {
+  GRID,
+  PIXEL_BYTES,
+  PIXEL_HEX_LEN,
+  emptyPixels,
+  pixelsFromHex,
+  pixelsToHex,
+  isPixelHex,
+  parseColor,
+  floodFill,
+  newDrawing,
+  validateEntry,
+} from './drawings.js';
+export {
   CALIBRATION_PATTERNS,
   CALIBRATION_TIMING,
   WALL_TIMING,

@@ -8,13 +8,15 @@
 
 import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { extname, join, resolve, sep } from 'node:path';
+import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
 import { Capture, parseCaptureParams } from './capture.js';
 import { parseMessage } from '../core/content-protocol.js';
+import { newDrawing, validateEntry, isPixelHex, pixelsFromHex } from '../core/drawings.js';
 import { isFetchablePort } from './ports.js';
 import { serialPorts, serialTakeOver } from './serial.js';
 import { FRAME_BYTES } from '../core/frame.js';
@@ -28,6 +30,11 @@ const ROOT = resolve(fileURLToPath(new URL('../web/', import.meta.url)));
 // core/ is imported directly by the browser app as ESM (no bundler), so it has
 // to be reachable as /core/*.js. It is the same files the Node tests run.
 const CORE_ROOT = resolve(fileURLToPath(new URL('../core/', import.meta.url)));
+
+// The drawings store: user entries live in one JSON file on disk, so a
+// gallery survives a server restart. --data <file> redirects it (the tests
+// point it at a temp path); the default is repo data/, which is gitignored.
+const DATA_FILE = resolve(fileURLToPath(new URL('../data/drawings.json', import.meta.url)));
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -56,6 +63,8 @@ function resolvePort(argv) {
       flag = arg.slice('--port='.length);
     } else if (arg === '--ddp') {
       i++; // consumed by resolveDdpTarget; accepted here so one argv carries both
+    } else if (arg === '--data') {
+      i++; // consumed by resolveDataFile, same as --ddp
     } else {
       console.error(`serve: unknown argument ${arg}`);
       console.error('usage: node tools/serve.js [--port <port>] [--ddp <host>]');
@@ -262,7 +271,9 @@ async function handleContentPost(req, res) {
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 4096) {
+    // 8 KB: a pic message carries a whole 20x20 drawing as hex (~3.3 KB), so
+    // the old 4 KB cap left almost no headroom for the JSON envelope.
+    if (size > 8192) {
       req.destroy();
       respond(res, 413, { 'Content-Type': 'text/plain; charset=utf-8' }, 'content command too large\n');
       return;
@@ -338,10 +349,127 @@ function handleContentFrameGet(req, res) {
   }, contentFrame.png);
 }
 
+/**
+ * GET/POST/DELETE /drawings - the user drawing entries, server-side.
+ *
+ * Same reasoning as /content: the editor tab, the server, and the gallery
+ * renderer (the capture browser) share nothing but this server, so the
+ * gallery lives HERE. An entry is {id, name, pixels, createdAt}; pixels is
+ * the hex wire form core/drawings.js defines, and validateEntry is the
+ * gate - the store never holds a malformed drawing.
+ *
+ * No users, no moderation: anyone who can reach the site can add an entry
+ * (it is a self-hosted family wall). The list is ordered oldest first, so
+ * the gallery's clock-cycling (index = floor(t/interval) % n) shows a
+ * stable order that never reshuffles while it cycles.
+ */
+function resolveDataFile(argv) {
+  const i = argv.indexOf('--data');
+  return i < 0 ? DATA_FILE : resolve(argv[i + 1] ?? DATA_FILE);
+}
+
+const drawings = { file: resolveDataFile(process.argv.slice(2)), list: [] };
+
+function loadDrawings() {
+  try {
+    const raw = JSON.parse(readFileSync(drawings.file, 'utf8'));
+    if (Array.isArray(raw)) drawings.list = raw.filter(validateEntry);
+  } catch {
+    // No file, junk file: an empty gallery, not a crash. The store is
+    // user data; a corrupt one is left on disk, not silently overwritten
+    // (it is only written after a successful mutation).
+  }
+}
+
+function saveDrawings() {
+  try {
+    mkdirSync(dirname(drawings.file), { recursive: true });
+    writeFileSync(drawings.file, JSON.stringify(drawings.list));
+  } catch (err) {
+    console.error(`serve: drawings not saved: ${err.message}`);
+  }
+}
+
+loadDrawings();
+
+/** The list without the pixel payloads: what GET /drawings answers. */
+function drawingMetas() {
+  return drawings.list.map(({ id, name, createdAt }) => ({ id, name, createdAt }));
+}
+
+async function handleDrawings(req, res, url) {
+  const seg = url.pathname.split('/');
+  if (req.method === 'GET') {
+    // /drawings/<id> -> the full entry (the gallery renderer fetches the
+    // pixels of one drawing per poll; the metas never carry pixels).
+    if (seg[2] !== undefined) {
+      const e = drawings.list.find((d) => d.id === seg[2]);
+      if (e === undefined) {
+        respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no such drawing\n');
+      } else {
+        respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(e));
+      }
+      return;
+    }
+    respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(drawingMetas()));
+    return;
+  }
+  if (req.method === 'POST') {
+    if (seg.length !== 2) {
+      respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, `404 Not Found: ${req.url}\n`);
+      return;
+    }
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > 8192) { // a full 20x20 hex drawing is ~3.3 KB; more is not a drawing
+        req.destroy();
+        respond(res, 413, { 'Content-Type': 'text/plain; charset=utf-8' }, 'drawing too large\n' );
+        return;
+      }
+      chunks.push(chunk);
+    }
+    let body;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch {
+      body = null;
+    }
+    if (body === null || typeof body !== 'object' || !isPixelHex(body.pixels)) {
+      respond(res, 400, { 'Content-Type': 'text/plain; charset=utf-8' }, 'not a legal drawing\n');
+      return;
+    }
+    // newDrawing takes BYTES; the wire form is hex. Feeding it the hex string
+    // would encode each character, not each byte, and store 6400 chars of
+    // nonsense - so the conversion is explicit here, at the boundary.
+    const e = newDrawing(body.name, pixelsFromHex(body.pixels));
+    drawings.list.push(e);
+    saveDrawings();
+    respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' },
+      JSON.stringify({ id: e.id, name: e.name, createdAt: e.createdAt }));
+    return;
+  }
+  if (req.method === 'DELETE') {
+    const id = seg[2];
+    const i = drawings.list.findIndex((d) => d.id === id);
+    if (i < 0) {
+      respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no such drawing\n');
+      return;
+    }
+    drawings.list.splice(i, 1);
+    saveDrawings();
+    respond(res, 204, {}, '');
+    return;
+  }
+  respond(res, 405, { Allow: 'GET, POST, DELETE', 'Content-Type': 'text/plain; charset=utf-8' }, 'Method not allowed\n');
+}
+
 const server = createServer(async (req, res) => {
-  // GET/HEAD serve files; POST is only the frame upload from the page.
-  if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
-    respond(res, 405, { Allow: 'GET, HEAD, POST', 'Content-Type': 'text/plain; charset=utf-8' }, 'Method not allowed\n');
+  // GET/HEAD serve files; POST is the frame/content/drawings uploads;
+  // DELETE is a drawing entry removal.
+  if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST' && req.method !== 'DELETE') {
+    respond(res, 405, { Allow: 'GET, HEAD, POST, DELETE', 'Content-Type': 'text/plain; charset=utf-8' }, 'Method not allowed\n');
     return;
   }
 
@@ -361,6 +489,10 @@ const server = createServer(async (req, res) => {
       await handleContentFramePost(req, res);
       return;
     }
+    if (url.pathname === '/drawings' || url.pathname.startsWith('/drawings/')) {
+      await handleDrawings(req, res, url);
+      return;
+    }
     respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, `404 Not Found: ${req.url}\n`);
     return;
   }
@@ -375,6 +507,16 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/content') {
     handleContentGet(req, res);
     return;
+  }
+  if (url.pathname === '/drawings' || url.pathname.startsWith('/drawings/')) {
+    if (req.method === 'GET') {
+      await handleDrawings(req, res, url);
+      return;
+    }
+    if (req.method === 'DELETE') {
+      await handleDrawings(req, res, url);
+      return;
+    }
   }
   // GET /serial - [{port:'COM8', state:'FREE'|'BUSY'}]. The app shows this
   // before Connect so 'port is taken' is a warning, not a mystery failure.

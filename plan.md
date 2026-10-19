@@ -84,3 +84,34 @@ serve the page from `tools/serve.js`, which binds 127.0.0.1 for exactly that.
 5. Layout calibration pass against the real panel using the physical-order preview.
 
 Milestone 1 is the one worth doing today — it's pure logic, fully testable, and everything else hangs off it.
+
+## 7. Drawings and the gallery
+
+The wall is a family noticeboard as much as a data display, so anyone who can
+reach it can put a picture on it. `web/draw.html` is a standalone 20×20 editor
+(pencil / eraser / bucket, native color picker, quick palette, recents, undo),
+and it has exactly two exits:
+
+- **Send** → `POST /content {kind:'pic', pixels:<3200 hex chars>}` — show this
+  drawing now. The bytes ride in the message, so a picture needs no server state
+  beyond the content channel every renderer already polls.
+- **Save** → `POST /drawings`, and `{kind:'gallery', interval}` puts the wall in
+  cycling mode.
+
+The model is `core/drawings.js`: one flat RGBA grid, 4 bytes per cell, 20×20 =
+1600 bytes, and the wire form is lowercase hex of those bytes (3200 chars). Alpha
+is the whole transparency story — a cell with `a=0` is *not used*, so it renders
+as nothing and the wall's black shows through. Empty is not white and not black:
+it is off, which is what a curtain of LEDs does with a cell nobody addressed.
+
+*Why the gallery lives on the server:* the topology is browser-as-brain, and the
+capture browser shares nothing with the tab a person draws in. `GET /drawings`
+(metas, never pixels) and `GET /drawings/<id>` (one entry's pixels) are the only
+way a drawing made on a phone reaches the wall. `{kind:'gallery', interval}` is a
+cadence signal, not a payload: which entry is showing is
+`floor(serverTime / interval) % n`, a pure function of the shared clock, so a page
+that loads mid-cycle lands on the same drawing as one that has been open an hour.
+
+*Why the store is one JSON file:* there are no users and no moderation here, and
+`validateEntry` is the gate at write time and at load time — a hand-edited or
+corrupt record is dropped, never trusted, and never a 500 in the renderer.
