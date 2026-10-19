@@ -134,8 +134,12 @@ test('two real browser tabs agree on the content after one POST', async () => {
     const tabA = await cdp.openTab(`${serve.base}/content.html?wall=1`);
     const tabB = await cdp.openTab(`${serve.base}/content.html`);
 
+    // A tab that has not finished loading has no #status yet - that is a poll
+    // condition, not an error, so the read is optional-chained and the
+    // predicate returns null and waits. Thrown out of a predicate, a slow
+    // machine fails a test that is about sync, not about load timing.
     const statusIs = (session, re, label) => async () => {
-      const t = await cdp.eval(session, 'document.getElementById("status").textContent');
+      const t = await cdp.eval(session, 'document.getElementById("status")?.textContent ?? ""').catch(() => '');
       if (re.test(t)) return t;
       return null;
     };
@@ -167,13 +171,13 @@ test('two real browser tabs agree on the content after one POST', async () => {
       body: JSON.stringify({v: 1, kind: 'fill', color: '#ff0000'}),
     });
     const fillIs = (session, label) => async () => {
-      const t = await cdp.eval(session, 'document.getElementById("status").textContent');
+      const t = await cdp.eval(session, 'document.getElementById("status")?.textContent ?? ""').catch(() => '');
       return /fill/.test(t) ? t : null;
     };
     await waitFor(fillIs(tabA, 'tab A shows fill'));
     await waitFor(fillIs(tabB, 'tab B shows fill'));
     const canvasIs = (session) => async () => {
-      const d = await cdp.eval(session, 'document.getElementById("wall").toDataURL()');
+      const d = await cdp.eval(session, 'document.getElementById("wall")?.toDataURL() ?? ""');
       return d.includes('base64,') ? d : null;
     };
     const a = await waitFor(canvasIs(tabA));
