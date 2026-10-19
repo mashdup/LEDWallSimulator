@@ -115,3 +115,38 @@ that loads mid-cycle lands on the same drawing as one that has been open an hour
 *Why the store is one JSON file:* there are no users and no moderation here, and
 `validateEntry` is the gate at write time and at load time — a hand-edited or
 corrupt record is dropped, never trusted, and never a 500 in the renderer.
+### 7.1 The guest page (`web/public.html`)
+
+`draw.html` is the owner's editor: it can show a picture now, start the gallery,
+remove an entry. A stranger standing in front of the wall gets `public.html`,
+which can do exactly one thing — add to the gallery — and says so in its own
+words. The boundary is not a permission flag and not a hidden panel: the page
+imports `core/drawings.js` and `web/draw-editor.js` and nothing else, so it has
+no `content-protocol.js` and no WebSocket in its module graph. It reads
+`GET /content` and `GET /drawings` to show what the wall is painting right now,
+and writes exactly one request: `POST /drawings`. The test asserts that
+boundary, not the happy path: one recorded non-GET fetch (`POST /drawings`),
+zero `WebSocket` constructions, the content `rev` identical before and after a
+guest saves, and no `send` / `gallery` / `interval` element in the DOM.
+
+*Why it is front-facing:* this page is in a window, so it leads with the wall.
+The grid is painted as a lit LED matrix (round beads, dark gaps, a glass
+highlight, and an unused cell drawn as a dim dead LED) because that is what the
+drawing is going to become; the tools sit under the grid in the thumb zone as
+icons; there is one verb and one button, "Put it on the wall"; and the page's
+ambient glow is tinted by the dominant color of the drawing the wall is showing,
+so the room and the wall agree. The "on the wall right now" panel derives its
+position from the server clock with the same `floor(serverTime / interval) % n`
+the renderers use, so a guest sees the wall's actual frame, not a guess.
+
+*Why the editing is a shared module:* `web/draw-editor.js` owns the RGBA bytes,
+the pointer stroke, the undo stack and the tool/color state, and paints through
+a `paint` callback the page supplies. Both pages therefore cannot disagree about
+what a drawing *is*, while the owner's grid stays graph paper and the guest's
+grid reads as LEDs. The canvas is the only DOM the editor touches.
+
+*Anonymity, stated honestly:* there is no account, so "who" is a name the
+visitor types and nobody checks. The 20 s save cooldown is per device and
+client-side — it slows one excited person down and is not a security boundary.
+A wall handed out on this page needs a server-side rate limit, and the owner's
+list is the pruning tool.
