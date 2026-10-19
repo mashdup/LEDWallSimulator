@@ -119,25 +119,25 @@ corrupt record is dropped, never trusted, and never a 500 in the renderer.
 
 `draw.html` is the owner's editor: it can show a picture now, start the gallery,
 remove an entry. A stranger standing in front of the wall gets `public.html`,
-which can do exactly one thing — add to the gallery — and says so in its own
-words. The boundary is not a permission flag and not a hidden panel: the page
-imports `core/drawings.js` and `web/draw-editor.js` and nothing else, so it has
-no `content-protocol.js` and no WebSocket in its module graph. It reads
-`GET /content` and `GET /drawings` to show what the wall is painting right now,
-and writes exactly one request: `POST /drawings`. The test asserts that
-boundary, not the happy path: one recorded non-GET fetch (`POST /drawings`),
-zero `WebSocket` constructions, the content `rev` identical before and after a
-guest saves, and no `send` / `gallery` / `interval` element in the DOM.
+which can do exactly one thing — add to the gallery — and shows exactly one
+thing: the grid, the tools, one button. The boundary is not a permission flag and
+not a hidden panel: the page imports `core/drawings.js` and
+`web/draw-editor.js` and nothing else, so it has no `content-protocol.js` and no
+WebSocket in its module graph. It writes one request, `POST /drawings`, and it
+reads nothing — not `/content`, not `/drawings`, not the frame. A guest does not
+need to know what the wall is showing, and a page that polls every two seconds
+is a page with a polling loop to get wrong. The test asserts that boundary
+completely: the only request made is `POST /drawings`, zero `WebSocket`
+constructions, the content `rev` identical before and after a guest saves, and no
+`send` / `gallery` / `interval` control and no wall panel anywhere in the DOM.
 
-*Why it is front-facing:* this page is in a window, so it leads with the wall.
-The grid is painted as a lit LED matrix (round beads, dark gaps, a glass
-highlight, and an unused cell drawn as a dim dead LED) because that is what the
-drawing is going to become; the tools sit under the grid in the thumb zone as
-icons; there is one verb and one button, "Put it on the wall"; and the page's
-ambient glow is tinted by the dominant color of the drawing the wall is showing,
-so the room and the wall agree. The "on the wall right now" panel derives its
-position from the server clock with the same `floor(serverTime / interval) % n`
-the renderers use, so a guest sees the wall's actual frame, not a guess.
+*Why it is front-facing:* this page is in a window, so the style carries it. The
+grid is painted as a lit LED matrix (round beads, dark gaps, a glass highlight,
+and an unused cell drawn as a dim dead LED) because that is what the drawing is
+going to become; the tools sit under the grid in the thumb zone as icons; there
+is one verb and one button, "Put it on the wall", stuck to the bottom of the
+viewport on a phone so a guest never hunts for it; and the LED glow is the only
+accent, so nothing competes with the panel.
 
 *Why the editing is a shared module:* `web/draw-editor.js` owns the RGBA bytes,
 the pointer stroke, the undo stack and the tool/color state, and paints through
