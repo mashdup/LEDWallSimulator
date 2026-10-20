@@ -29,7 +29,7 @@ test('clear is black, fill is the color, rect draws a block', () => {
 });
 
 test('every named animation produces a lit, in-range frame', () => {
-  for (const name of ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock']) {
+  for (const name of ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock', 'sparkle']) {
     const px = animFrame({ kind: 'anim', name }, 1791998675.123);
     // bounce is a 2x2 ball plus a 5-cell trail: at most 9 lit cells by design.
     const min = name === 'bounce' ? 5 : 10;
@@ -89,6 +89,62 @@ test('snitch: gold-dominant comet on a dark sky, and it flies', () => {
   }
   assert.ok(moved > 10, `the snitch must move, ${moved} pixels changed`);
 });
+test('sparkle: a pink field that sparkles, and the sparkles twinkle', () => {
+  const f = animFrame({ v: 1, kind: 'anim', name: 'sparkle' }, 1234.5);
+  // DOMINANTLY pink is the brief, so measure the whole panel, not one pixel:
+  // every cell lit, red high, blue mid, green low. A field that is pink on
+  // average can still be a magenta/green wash cell by cell, so check the
+  // per-cell relation too.
+  let rSum = 0;
+  let gSum = 0;
+  let bSum = 0;
+  let pinkCells = 0;
+  let sparkCells = 0;
+  for (let i = 0; i < f.length; i += 3) {
+    const [r, g, b] = [f[i], f[i + 1], f[i + 2]];
+    rSum += r; gSum += g; bSum += b;
+    if (r > 235 && b > 215 && b > 170) { sparkCells++; continue; }
+    if (r > 60 && r > g + 40 && b > g + 20) pinkCells++;
+  }
+  // The panel is pink EVERYWHERE except the sparkles. An average-only check
+  // passes on a magenta-and-green wash; a per-cell check does not.
+  assert.equal(pinkCells + sparkCells, 400, 'every cell is pink or a sparkle, nothing in between');
+  assert.ok(sparkCells >= 1 && sparkCells < 60, `sparkles must exist and stay sparse, got ${sparkCells}/400`);
+  assert.ok(rSum / 400 > 110, `the field must be bright enough to be a pink WALL, got r=${Math.round(rSum / 400)}`);
+  assert.ok(rSum / 400 > bSum / 400 + 20, 'red over blue: rose, not violet');
+  assert.ok(bSum / 400 > gSum / 400 + 40, 'blue well over green: pink, not brown');
+
+  // The sparkles: cells driven to near-white-pink, and SPARSE - a sparkle
+  // field that covers a third of the panel is snow, not sparkle.
+  const sparks = (px) => {
+    const out = [];
+    for (let i = 0; i < px.length; i += 3) {
+      if (px[i] > 235 && px[i + 2] > 215 && px[i + 1] > 170) out.push(i / 3);
+    }
+    return out;
+  };
+  const s0 = sparks(f);
+  assert.ok(s0.length >= 1, 'a frame must have at least one sparkle');
+  assert.ok(s0.length < 60, `sparkles must stay sparse, got ${s0.length}/400`);
+
+  // They TWINKLE: the set of lit sparkles moves over a third of a second,
+  // while the pink field underneath stays a field.
+  const f2 = animFrame({ v: 1, kind: 'anim', name: 'sparkle' }, 1234.83);
+  const s1 = sparks(f2);
+  const same = s0.filter((c) => s1.includes(c)).length;
+  assert.ok(s0.length > 0 && s1.length > 0, 'both frames sparkle');
+  assert.ok(same < Math.max(s0.length, s1.length), 'the same cells must not all be lit twice: that is a static pattern');
+  let field = 0;
+  for (let i = 0; i < f.length; i += 3) {
+    const d = Math.abs(f[i] - f2[i]) + Math.abs(f[i + 1] - f2[i + 1]) + Math.abs(f[i + 2] - f2[i + 2]);
+    if (d < 30) field++;
+  }
+  assert.ok(field > 300, `the pink field must hold still while the sparkles fire, ${field}/400 steady`);
+
+  // Pure like every other animation: the same server second, the same bytes.
+  assert.deepEqual(f, animFrame({ v: 1, kind: 'anim', name: 'sparkle' }, 1234.5));
+});
+
 import { emptyPixels, pixelsToHex } from '../core/drawings.js';
 
 test('a pic state paints its own cells, and an unused cell is black, not white', () => {

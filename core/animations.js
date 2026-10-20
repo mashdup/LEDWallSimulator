@@ -38,7 +38,10 @@ function noise(x, y) {
   return a + (b - a) * s(yf);
 }
 
-function hsl(h, s, l) {
+/** HSL -> [r,g,b] 0..255. Exported: content.html's sparkle paints from these
+ * exact numbers, so the capture browser and the frame driver agree on every
+ * pink pixel instead of each trusting its own colour conversion. */
+export function hsl(h, s, l) {
   h = ((h % 360) + 360) % 360;
   const c = (1 - Math.abs(2 * l - 1)) * s;
   const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
@@ -243,6 +246,52 @@ export function animFrame(state, tRaw, grid = 20) {
       set(cx, cy - 1, 130, 100, 30);
       set(cx, cy + 1, 130, 100, 30);
       set(cx, cy, 255, 214, 90);
+      return px;
+    }
+    case 'sparkle': {
+      // Pink with sparkles: a deep rose field that drifts, and sparse cells
+      // that flash white-pink on their own period. The field is the point -
+      // the panel must READ pink from across the room - so the base sits low
+      // (lightness 0.22-0.40) and the sparkles get the headroom.
+      //
+      // Which cells can twinkle, and when, comes from a coordinate hash: the
+      // sparkle cells are fixed pixels with fixed phases, so every renderer
+      // twinkles at the same cells in the same order, forever in phase, with
+      // no state and no Math.random. The envelope is w^8 - a flash, not a
+      // pulse: a wide flat base and a short bright peak, which is what a
+      // sparkle is. The halo is a plus of neighbours at half the flash, so a
+      // single lit cell reads as a star and not as a stray white pixel.
+      for (let y = 0; y < grid; y++) {
+        for (let x = 0; x < grid; x++) {
+          const n = noise(x * 0.16 + t * 0.07, y * 0.16 - t * 0.05);
+          const [r, g, b] = hsl(318 + 16 * (n - 0.5) * 2, 0.85, 0.22 + 0.18 * n);
+          set(x, y, r, g, b);
+        }
+      }
+      const flash = (x, y, f) => {
+        if (x < 0 || y < 0 || x >= grid || y >= grid) return;
+        const i = (y * grid + x) * 3;
+        px[i] += (255 - px[i]) * f;
+        px[i + 1] += (236 - px[i + 1]) * f;
+        px[i + 2] += (248 - px[i + 2]) * f;
+      };
+      for (let y = 0; y < grid; y++) {
+        for (let x = 0; x < grid; x++) {
+          const seed = hash(x * 157.3 + y * 71.7);
+          if (seed <= 0.86) continue;
+          const period = 1.6 + seed * 4.0;
+          const p = ((t + seed * 100) % period) / period;
+          const w = Math.max(0, 1 - Math.abs(p - 0.5) * 2);
+          const f = w * w * w * w * w * w * w * w;
+          if (f < 0.02) continue;
+          flash(x, y, f);
+          const h = f * 0.5;
+          flash(x - 1, y, h);
+          flash(x + 1, y, h);
+          flash(x, y - 1, h);
+          flash(x, y + 1, h);
+        }
+      }
       return px;
     }
     default: { // 'demo' and any future name falls back to the original

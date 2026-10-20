@@ -61,7 +61,7 @@ import { startKeepAlive } from './keep-alive.js';
 import { Panel, Scroller } from '../core/index.js';
 import { GRID, pixelsFromHex } from '../core/drawings.js';
 import { gallerySlot } from '../core/content-protocol.js';
-import { animFrame } from '../core/animations.js';
+import { animFrame, hsl } from '../core/animations.js';
 import { applyTransition } from '../core/transitions.js';
 import { Banner } from './banner.js';
 /*
@@ -427,6 +427,49 @@ function animDraw(name, tRaw) {
       const scy = Math.round(sy);
       for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) WALL.set(scx + dx, scy + dy, 'rgb(130,100,30)');
       WALL.set(scx, scy, 'rgb(255,214,90)');
+      return;
+    }
+    case 'sparkle': {
+      // Pink with sparkles, identical to core/animations.js: a deep rose
+      // field that drifts, sparse cells flashing white-pink on their own
+      // hash-driven period. Same cells, same phases, same order in every
+      // renderer - the twinkle is arithmetic, not randomness.
+      const base = new Float64Array(G * G * 3);
+      for (let y = 0; y < G; y++) {
+        for (let x = 0; x < G; x++) {
+          const n = noise(x * 0.16 + t * 0.07, y * 0.16 - t * 0.05);
+          const [r, g, b] = hsl(318 + 16 * (n - 0.5) * 2, 0.85, 0.22 + 0.18 * n);
+          const i = (y * G + x) * 3;
+          base[i] = r; base[i + 1] = g; base[i + 2] = b;
+        }
+      }
+      const flash = (x, y, f) => {
+        if (x < 0 || y < 0 || x >= G || y >= G) return;
+        const i = (y * G + x) * 3;
+        base[i] += (255 - base[i]) * f;
+        base[i + 1] += (236 - base[i + 1]) * f;
+        base[i + 2] += (248 - base[i + 2]) * f;
+      };
+      for (let y = 0; y < G; y++) {
+        for (let x = 0; x < G; x++) {
+          const seed = hash(x * 157.3 + y * 71.7);
+          if (seed <= 0.86) continue;
+          const period = 1.6 + seed * 4.0;
+          const p = ((t + seed * 100) % period) / period;
+          const w = Math.max(0, 1 - Math.abs(p - 0.5) * 2);
+          const f = w * w * w * w * w * w * w * w;
+          if (f < 0.02) continue;
+          flash(x, y, f);
+          const h = f * 0.5;
+          flash(x - 1, y, h); flash(x + 1, y, h); flash(x, y - 1, h); flash(x, y + 1, h);
+        }
+      }
+      for (let y = 0; y < G; y++) {
+        for (let x = 0; x < G; x++) {
+          const i = (y * G + x) * 3;
+          WALL.set(x, y, `rgb(${Math.round(base[i])},${Math.round(base[i + 1])},${Math.round(base[i + 2])})`);
+        }
+      }
       return;
     }
     default: { // 'demo' and any future name falls back to the original
