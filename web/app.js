@@ -43,6 +43,7 @@ import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
 import { ANIM_NAMES, makeMessage, gallerySlot } from '../core/content-protocol.js';
+import { applyTransition } from '../core/transitions.js';
 import { animFrame } from '../core/animations.js';
 
 const $ = (id) => document.getElementById(id);
@@ -795,23 +796,34 @@ function cGalleryFetch(id) {
     .then(() => { cGallery.pending.delete(id); });
 }
 
-/** The state to render this tick: the drawing, or the break, the clock points at. */
-function cGalleryState(tSec) {
-  cGalleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
-  const slot = gallerySlot(tSec, cGallery.metas.length,
-    cState.interval ?? 5, cState.gap ?? 0, cState.gapAnim ?? 'none');
-  // The break between drawings is an anim state, so animFrame() draws it: the
-  // library is already pure, and the driver's job is only to say which slot of
-  // the cycle the clock is in.
-  if (slot.anim !== null) return { kind: 'anim', name: slot.anim };
-  if (slot.drawing < 0) return { kind: 'clear' };
+/**
+ * The flat RGB bytes of one slot: a drawing off the wire, a break animation,
+ * or dark. From the pure generator, so the transition blends two frames of the
+ * same origin, and this tab and a content tab compose identical bytes.
+ */
+function cSlotBytes(slot, tSec) {
+  if (slot.anim !== null) return animFrame({ kind: 'anim', name: slot.anim }, tSec);
+  if (slot.drawing < 0) return new Uint8Array(20 * 20 * 3);
   const meta = cGallery.metas[slot.drawing];
   const hex = cGallery.cache.get(meta.id);
   if (hex === undefined) {
     cGalleryFetch(meta.id);
-    return { kind: 'clear' }; // dark this tick; the pixels land on the next one
+    return new Uint8Array(20 * 20 * 3); // dark this tick; the pixels land on the next one
   }
-  return { kind: 'pic', pixels: hex };
+  return animFrame({ kind: 'pic', pixels: hex }, tSec);
+}
+
+/** The bytes to push this tick: the slot, plus the transition into it. */
+function cGalleryBytes(tSec) {
+  cGalleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
+  const slot = gallerySlot(tSec, cGallery.metas.length,
+    cState.interval ?? 5, cState.gap ?? 0, cState.gapAnim ?? 'none', cState.transitionSec ?? 0);
+  const to = cSlotBytes(slot, tSec);
+  // The transition is a slot boundary, not a timer: k comes from the same
+  // clock arithmetic that picked the slot, so a page that loads mid-wipe is
+  // mid-wipe, and the capture browser and this driver agree on the frame.
+  if (slot.from === null) return to;
+  return applyTransition(cState.transition ?? 'none', cSlotBytes(slot.from, tSec), to, slot.k);
 }
 
 async function pollContent() {
@@ -864,7 +876,7 @@ function pushContentFrame() {
     cScroller.render(cPanel);
     bytes = cPanel.pixels;
   } else if (cState.kind === 'gallery') {
-    bytes = animFrame(cGalleryState(tSec), tSec);
+    bytes = cGalleryBytes(tSec);
   } else {
     bytes = animFrame(cState, tSec);
   }
@@ -949,7 +961,7 @@ function mirrorContent(j) {
   const what = s.kind === 'text' ? `text: ${String(s.text).slice(0, 32)}`
     : s.kind === 'anim' ? s.name
     : s.kind === 'pic' ? 'drawing'
-    : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s${(s.gap ?? 0) > 0 ? ` + ${s.gap} s of ${s.gapAnim ?? 'none'}` : ''} · ${cGallery.metas.length} drawings`
+    : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s${(s.gap ?? 0) > 0 ? ` + ${s.gap} s of ${s.gapAnim ?? 'none'}` : ''}${(s.transitionSec ?? 0) > 0 ? ` · ${s.transition ?? 'fade'} ${s.transitionSec} s` : ''} · ${cGallery.metas.length} drawings`
     : s.kind;
   setOutput($('contentOut'), `server rev ${j.rev} - showing: ${what}`);
   for (const b of $('contentAnims').children) {

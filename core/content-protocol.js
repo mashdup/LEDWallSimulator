@@ -16,11 +16,13 @@
  *   text    {text, color?, fps?, step?, loop?}   scroll a banner
  *   anim    {name: 'demo' | 'off'} start/stop the page's own demo
  *   pic     {pixels}  one 20x20 user drawing (hex RGBA wire form)
- *   gallery {interval?, gap?, gapAnim?}  cycle the saved drawings, with an
- *            animation in the break between them
+ *   gallery {interval?, gap?, gapAnim?, transition?, transitionSec?}
+ *            cycle the saved drawings on the server, with an animation in the
+ *            break between them and a transition into each slot
  */
 
 import { isPixelHex } from './drawings.js';
+import { TRANSITION_NAMES } from './transitions.js';
 
 export const CONTENT_CHANNEL = 'ledwall-content';
 export const CONTENT_PROTOCOL_V = 1;
@@ -41,43 +43,76 @@ export const ANIM_NAMES = ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', '
  */
 export const GAP_ANIM_NAMES = ['none', ...ANIM_NAMES];
 
+/** Re-exported so a consumer of the protocol has the transition list next to the cadence fields it validates. */
+export { TRANSITION_NAMES } from './transitions.js';
+
 /** The gallery cadence a page uses when it is told to "start the gallery" and nothing else is chosen. */
-export const GALLERY_DEFAULTS = { interval: 8, gap: 5, gapAnim: 'rain' };
+export const GALLERY_DEFAULTS = {
+  interval: 8, gap: 5, gapAnim: 'rain', transition: 'fade', transitionSec: 1,
+};
 
 /**
- * gallerySlot(tSec, n, interval, gap, gapAnim) -> {drawing, anim}
+ * gallerySlot(tSec, n, interval, gap, gapAnim, transitionSec) -> slot descriptor
  *
  * The whole cadence as one pure function of the shared server clock, so the
  * wall, a human's tab and a capture browser that loads fresh mid-cycle all land
- * on the same slot of the same cycle. A slot is a drawing for `interval`
- * seconds and then the break for `gap` seconds:
+ * on the same slot of the same cycle - and on the same frame of the same
+ * transition. A slot is one drawing plus its break, so a cycle is n slots:
  *
- *   period = n * (interval + gap);  pos = t mod period
- *   slot   = floor(pos / (interval + gap));  phase = pos - slot * (interval + gap)
+ *   period = interval + gap;  pos = t mod (n * period)
+ *   slot   = floor(pos / period);  phase = pos - slot * period
+ *   phase < interval ? drawing[slot] : the break
  *
- * `gap` is clamped, not validated: this is a renderer's arithmetic on a clock,
- * and a renderer must never throw in the middle of a frame. The protocol gate
- * is what rejects a bad message; this is what survives one.
+ * The transition opens the DRAWING: for the first `transitionSec` seconds of a
+ * slot the wall is between the frame it was on and this drawing, and the
+ * descriptor says so - `from` is what the previous slot was showing when it
+ * ended (its break, if there is one, otherwise its drawing), `k` is 0..1
+ * progress. Outside that window `from` is null and `k` is 0.
  *
- * Returns {drawing: index, anim: null} while a drawing shows, and
- * {drawing: null, anim: 'rain'} (or anim: null for gapAnim 'none') in the
- * break. n === 0 gives {drawing: -1, anim: null}: an empty gallery is dark.
+ * The drawing -> break seam is deliberately a cut. A transition is for the
+ * boundary people experience as a hard swap - picture to picture. The break is
+ * a rest, and on a 20-cell panel a wipe into a moving pattern is a wipe of
+ * noise. One blended seam also keeps the blend inside the part of the slot it
+ * belongs to, which is what makes it finish.
+ *
+ * `gap`, `transitionSec` and friends are CLAMPED, not validated: this is a
+ * renderer's arithmetic on a clock, and a renderer must never throw in the
+ * middle of a frame. The protocol gate is what rejects a bad message; this is
+ * what survives one. Negative time is real (clock skew), so `pos` is wrapped
+ * into range before it indexes anything.
+ *
+ * Returns {drawing, anim, from, k}. An empty gallery is {drawing: -1,
+ * anim: null, from: null, k: 0} - dark, and never an index into an empty list.
  */
-export function gallerySlot(tSec, n, interval = 8, gap = 0, gapAnim = 'none') {
+export function gallerySlot(tSec, n, interval = 8, gap = 0, gapAnim = 'none', transitionSec = 0) {
   const count = Number.isInteger(n) && n > 0 ? n : 0;
-  if (count === 0) return { drawing: -1, anim: null };
+  if (count === 0) return { drawing: -1, anim: null, from: null, k: 0 };
   const show = Math.max(1, Number(interval) || 1);
   const brk = Math.max(0, Number(gap) || 0);
-  if (brk === 0) {
-    return { drawing: Math.floor(tSec / show) % count, anim: null };
-  }
+  const breakSlot = () => ({ drawing: -1, anim: gapAnim === 'none' ? null : gapAnim });
+
   const period = show + brk;
-  const pos = ((tSec % (count * period)) + count * period) % (count * period);
+  const cycle = count * period;
+  const pos = ((tSec % cycle) + cycle) % cycle;
   const slot = Math.floor(pos / period);
   const phase = pos - slot * period;
-  return phase < show
-    ? { drawing: slot, anim: null }
-    : { drawing: -1, anim: gapAnim === 'none' ? null : gapAnim };
+
+  if (brk > 0 && phase >= show) {
+    // The break: no transition, by the paragraph above.
+    return { ...breakSlot(), from: null, k: 0 };
+  }
+
+  const cur = { drawing: slot, anim: null };
+  // A transition longer than the drawing it opens is clamped: a blend that
+  // runs past the boundary would find its own target changed under it halfway
+  // through - the frame it is blending toward is no longer the one it started
+  // from.
+  const trans = Math.max(0, Math.min(Number(transitionSec) || 0, show - 0.25));
+  if (trans <= 0 || phase >= trans) return { ...cur, from: null, k: 0 };
+  // What the previous slot was showing when it ended: its break, if there is
+  // one, otherwise its drawing. That is the frame the wall was on.
+  const from = brk > 0 ? breakSlot() : { drawing: (slot - 1 + count) % count, anim: null };
+  return { ...cur, from, k: phase / trans };
 }
 
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$|^[a-zA-Z]+$/;
@@ -176,6 +211,17 @@ export function parseMessage(data) {
       if (data.gapAnim !== undefined) {
         if (!GAP_ANIM_NAMES.includes(data.gapAnim)) return null;
         m.gapAnim = data.gapAnim;
+      }
+      if (data.transition !== undefined) {
+        if (!TRANSITION_NAMES.includes(data.transition)) return null;
+        m.transition = data.transition;
+      }
+      if (data.transitionSec !== undefined) {
+        // Whole seconds: the cadence is spoken in seconds everywhere else, and
+        // a 0.4 s value nobody can type into a number input is a value that
+        // will never be set. 0 is legal and means a hard cut.
+        if (!intIn(data.transitionSec, 0, 30)) return null;
+        m.transitionSec = data.transitionSec;
       }
       return m;
     }

@@ -105,6 +105,8 @@
       <label>break <input id="gap" type="number" min="0" max="600" value="5"> s
         <select id="gapAnim"></select>
       </label>
+      <label>transition <select id="trans"></select> <input id="transSec" type="number" min="0" max="30" value="1"> s
+      </label>
       <button id="gallery" type="button">Start gallery</button>
     </div>
 
@@ -127,7 +129,7 @@
 
 <script type="module">
 import { GRID, pixelsToHex, pixelsFromHex } from '../core/drawings.js';
-import { makeMessage, GAP_ANIM_NAMES, GALLERY_DEFAULTS } from '../core/content-protocol.js';
+import { makeMessage, GAP_ANIM_NAMES, TRANSITION_NAMES, GALLERY_DEFAULTS } from '../core/content-protocol.js';
 import { createEditor, flatPaint, DEFAULT_PALETTE, loadRecent, saveRecent } from './draw-editor.js';
 
 const $ = (id) => document.getElementById(id);
@@ -263,6 +265,15 @@ for (const name of GAP_ANIM_NAMES) {
   gapAnim.append(o);
 }
 gapAnim.value = GALLERY_DEFAULTS.gapAnim;
+const trans = $('trans');
+for (const name of TRANSITION_NAMES) {
+  const o = document.createElement('option');
+  o.value = name;
+  o.textContent = name === 'none' ? 'hard cut' : name;
+  trans.append(o);
+}
+trans.value = GALLERY_DEFAULTS.transition;
+$('transSec').value = String(GALLERY_DEFAULTS.transitionSec);
 $('gap').value = String(GALLERY_DEFAULTS.gap);
 $('interval').value = String(GALLERY_DEFAULTS.interval);
 
@@ -270,11 +281,16 @@ $('gallery').addEventListener('click', async () => {
   const interval = Math.max(1, Math.min(600, Number($('interval').value) || GALLERY_DEFAULTS.interval));
   const gap = Math.max(0, Math.min(600, Number($('gap').value) || 0));
   const anim = GAP_ANIM_NAMES.includes(gapAnim.value) ? gapAnim.value : 'none';
+  const transition = TRANSITION_NAMES.includes(trans.value) ? trans.value : 'none';
+  const transitionSec = Math.max(0, Math.min(30, Number($('transSec').value) || 0));
   $('interval').value = String(interval);
   $('gap').value = String(gap);
+  $('transSec').value = String(transitionSec);
   try {
-    await post('/content', JSON.stringify(makeMessage('gallery', { interval, gap, gapAnim: anim })));
-    set(`gallery: every ${interval} s${gap > 0 ? ` + ${gap} s of ${anim}` : ''}`);
+    await post('/content', JSON.stringify(makeMessage('gallery',
+      { interval, gap, gapAnim: anim, transition, transitionSec })));
+    set(`gallery: every ${interval} s${gap > 0 ? ` + ${gap} s of ${anim}` : ''}`
+      + `${transitionSec > 0 ? ` · ${transition} ${transitionSec} s` : ''}`);
   } catch (err) {
     set(`gallery failed: ${err.message}`, false);
   }

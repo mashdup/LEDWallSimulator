@@ -261,3 +261,57 @@ at runtime.* `--max-drawings` protects the wall from the page on the QR code;
 it was never a ceiling on the person who set it.
 
 The token is not a client flag: a wrong token is a stranger, and gets the 429.
+
+### 7.5 The transition between slots
+
+A gallery with a break is a slideshow that rests; a gallery with a **transition**
+is one that arrives. Each slot opens by blending in — the frame the wall was on,
+and the new drawing, with `k` going from 0 to 1 over `transitionSec` seconds.
+Default: `fade`, 1 s.
+
+`core/transitions.js` is the whole effect library, and it is pure bytes:
+
+```
+applyTransition(name, from, to, k, grid) -> Uint8Array(grid*grid*3)
+```
+
+`fade` is linear; `wipe` reveals whole columns with a lit leading edge (on a
+20-cell panel a bare 0/1 reveal reads as a *jump*; the moving edge is what reads
+as a sweep); `slide` moves one picture in from the right and carries the other
+off the left, as one movement, so the last frame has no seam in it; `dissolve`
+cross-fades each cell on a schedule set by a **hash of its coordinates** — not
+randomness, so the same cells dissolve in the same order in every renderer,
+forever in phase.
+
+*The contract is at the ends.* `k <= 0` is `from` byte for byte and `k >= 1` is
+`to`, for every name **including `none`**. A transition that starts or ends
+approximately flickers at every slot boundary, and a wall that runs for hours
+flickers once per drawing. The first version of this file had exactly that bug:
+the name was checked before the progress, so `none` at `k = 1` returned the old
+frame — a hard cut that never completed.
+
+*One seam, on purpose.* The transition opens the **drawing**. The drawing →
+break seam stays a cut: a transition is for the boundary people experience as a
+hard swap (picture to picture), the break is a rest, and on a 20-cell panel a
+wipe into a moving pattern is a wipe of noise. Keeping one seam blended also
+keeps the blend inside the part of the slot it belongs to, which is what makes
+it finish — a transition longer than the drawing it opens is clamped, because a
+blend that runs past a boundary finds its own target changed under it halfway
+through.
+
+*Both renderers compose the gallery from the pure generator.* `content.html` and
+`app.js` build the frame as `animFrame(slot)` blended with
+`applyTransition(animFrame(previous slot))`. That is a deliberate narrowing: the
+gallery is the one place where the capture browser and the frame driver are
+guaranteed byte-identical, because neither uses its own painter there. A
+transition needs *two* frames of the same origin, and two implementations of the
+animation library cannot promise that.
+
+*The test asserts the shape, not the color.* A fade between a red wall and a blue
+wall is a **uniform purple** — "both colors present" is true of a wipe and false
+of a fade, so it is the wrong observable. The observable that fits every
+transition is a frame that is **neither saved drawing**: a picture the gallery
+never made. The wipe adds the assertion that only a wipe has — one drawing on
+one side, the other on the other. And the control is the hard cut: with
+`transitionSec: 0` there must be no in-between frame at all, which is what stops
+the first two assertions from proving nothing.

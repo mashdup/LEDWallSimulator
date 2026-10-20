@@ -61,6 +61,8 @@ import { startKeepAlive } from './keep-alive.js';
 import { Panel, Scroller } from '../core/index.js';
 import { GRID, pixelsFromHex } from '../core/drawings.js';
 import { gallerySlot } from '../core/content-protocol.js';
+import { animFrame } from '../core/animations.js';
+import { applyTransition } from '../core/transitions.js';
 import { Banner } from './banner.js';
 /*
  * WALL — the drawing API for this page's canvas, sized to the panel.
@@ -508,42 +510,48 @@ async function galleryRefresh(force = false) {
 }
 
 function gallerySlotNow(t) {
-  return gallerySlot(t, gallery.metas.length, state.interval ?? 5, state.gap ?? 0, state.gapAnim ?? 'none');
+  return gallerySlot(t, gallery.metas.length, state.interval ?? 5, state.gap ?? 0,
+    state.gapAnim ?? 'none', state.transitionSec ?? 0);
+}
+
+/**
+ * The flat RGB bytes of one slot: a drawing off the wire, a break animation,
+ * or dark. From core, in this renderer as in the app tab - the gallery is
+ * composed from the pure generator in BOTH renderers, so the capture browser
+ * and the frame driver cannot drift, and a transition has two frames of the
+ * same origin to blend.
+ */
+function slotBytes(slot, t) {
+  if (slot.anim !== null) return animFrame({ kind: 'anim', name: slot.anim }, t);
+  if (slot.drawing < 0) return new Uint8Array(GRID * GRID * 3);
+  const meta = gallery.metas[slot.drawing];
+  const hex = gallery.cache.get(meta.id);
+  if (hex === undefined) {
+    galleryFetch(meta.id);
+    return new Uint8Array(GRID * GRID * 3); // dark this tick; the pixels land on the next one
+  }
+  return animFrame({ kind: 'pic', pixels: hex }, t);
 }
 
 function galleryDraw(t) {
   galleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
   const slot = gallerySlotNow(t);
-  // The break between drawings: an animation, from the same library the anim
-  // buttons use, chosen by the same clock arithmetic - so every renderer is in
-  // the break at the same second, and nobody "starts" it.
-  if (slot.anim !== null) {
-    animDraw(slot.anim, t);
-    const blabel = `gallery break · ${slot.anim}`;
-    if (blabel !== gallery.label) {
-      gallery.label = blabel;
-      setOutput(blabel);
-    }
-    return;
+  let bytes = slotBytes(slot, t);
+  // The transition into this slot: the previous slot's frame, at the SAME
+  // clock, blended by the same k every other renderer computes. The animation
+  // keeps running through the blend (its frame is taken at t, not at the slot
+  // boundary), so a wipe into a break animation is a wipe of a moving picture.
+  if (slot.from !== null) {
+    bytes = applyTransition(state.transition ?? 'none', slotBytes(slot.from, t), bytes, slot.k);
   }
-  WALL.clear();
-  if (slot.drawing < 0) {
-    // Dark: an empty gallery, or a break with gapAnim 'none'.
-    const dlabel = gallery.metas.length === 0 ? 'gallery: empty' : 'gallery break · dark';
-    if (dlabel !== gallery.label) {
-      gallery.label = dlabel;
-      setOutput(dlabel);
-    }
-    return;
-  }
-  const meta = gallery.metas[slot.drawing];
-  const hex = gallery.cache.get(meta.id);
-  if (hex === undefined) {
-    galleryFetch(meta.id);
-    return; // this tick stays black; the pixels land on the next one
-  }
-  paintPixels(hex);
-  const label = `gallery ${slot.drawing + 1}/${gallery.metas.length}${meta.name ? ' · ' + meta.name : ''}`;
+  paintBytes(bytes);
+
+  const label = slot.drawing >= 0
+    ? `gallery ${slot.drawing + 1}/${gallery.metas.length}${gallery.metas[slot.drawing]?.name
+      ? ' · ' + gallery.metas[slot.drawing].name : ''}`
+    : slot.anim !== null
+      ? `gallery break · ${slot.anim}`
+      : gallery.metas.length === 0 ? 'gallery: empty' : 'gallery break · dark';
   if (label !== gallery.label) {
     gallery.label = label;
     setOutput(label);

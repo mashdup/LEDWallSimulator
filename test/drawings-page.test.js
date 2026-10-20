@@ -268,6 +268,16 @@ test('the APP tab as frame driver shows drawings too, not the demo', async () =>
     const breakSeen = await frameWhere(serve, (s) => (classify(s) === 'other' ? s : null), 25_000);
     assert.ok(breakSeen, 'the app driver must paint the break animation, not a dark wall');
 
+    // The transition, through the same driver, with two drawings to blend.
+    const two = await postJson(`${serve.base}/drawings`, { name: 'blue', pixels: pixelsToHex(solid([0, 0, 255])) });
+    assert.ok(two.ok);
+    const fade = await postJson(`${serve.base}/content`, {
+      v: 1, kind: 'gallery', interval: 3, gap: 0, transition: 'fade', transitionSec: 2,
+    });
+    assert.equal(fade.status, 200);
+    const mid = await frameWhere(serve, (s) => (frameKind(s) === 'mid' ? s : null), 25_000);
+    assert.ok(mid, 'the app driver must blend the transition, not cut between pictures');
+
     // And a one-shot pic through the same driver.
     const pic = await postJson(`${serve.base}/content`, {
       v: 1, kind: 'pic', pixels: pixelsToHex(solid([0, 255, 0])),
@@ -453,6 +463,116 @@ test('the gallery takes a break: an animation fills the gap between drawings', a
     for (const k of ['red', 'blue', 'dark']) {
       assert.ok(dark.includes(k), `a dark break must show ${k}; saw ${JSON.stringify(dark)}`);
     }
+  } finally {
+    if (proc !== null) proc.kill();
+    await serve.stop();
+    dropProfile(profile);
+    dropProfile(dir);
+  }
+});
+
+/**
+ * What a frame is, against the two drawings this test seeds.
+ *
+ * A fade between a red wall and a blue wall is a UNIFORM purple: every cell is
+ * in-between, so "both colors present" is the wrong observable (it is true of a
+ * wipe and false of a fade). The observable that fits a transition of any kind
+ * is a frame that is neither drawing - a picture the gallery never saved.
+ */
+function frameKind(shot) {
+  let lit = 0;
+  let red = 0;
+  let blue = 0;
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      const c = at(shot.rgba, x, y);
+      if (c[3] === 0) continue;
+      lit += 1;
+      if (c[0] === 255 && c[1] === 0 && c[2] === 0) red += 1;
+      else if (c[0] === 0 && c[1] === 0 && c[2] === 255) blue += 1;
+    }
+  }
+  const all = GRID * GRID;
+  if (lit < all) return 'partial'; // a list refetch, a wipe edge, a slide gap
+  if (red === all) return 'red';
+  if (blue === all) return 'blue';
+  return 'mid';
+}
+
+test('the gallery transitions between drawings, on the wall, not only in the descriptor', async () => {
+  const chrome = findChrome();
+  if (chrome === null) return;
+
+  const dir = mkdtempSync(join(tmpdir(), 'omp-trans-'));
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json'), ...noGuards()]);
+  const dbgPort = await freePort();
+  const profile = mkdtempSync(join(tmpdir(), 'omp-trans-profile-'));
+  let proc = null;
+
+  try {
+    const red = await postJson(`${serve.base}/drawings`, { name: 'red', pixels: pixelsToHex(solid([255, 0, 0])) });
+    const blue = await postJson(`${serve.base}/drawings`, { name: 'blue', pixels: pixelsToHex(solid([0, 0, 255])) });
+    assert.ok(red.ok && blue.ok);
+
+    const browser = await openBrowser(chrome, dbgPort, profile);
+    proc = browser.proc;
+    const cdp = browser.cdp;
+    const tab = await cdp.openTab(`${serve.base}/content.html?wall=1`);
+    await waitFor(async () => {
+      const t = await cdp.eval(tab, 'document.getElementById("status").textContent').catch(() => '');
+      return /demo/.test(t) ? t : null;
+    });
+
+    // No break, so the only seam is drawing to drawing - the boundary the
+    // feature is for. 3 s each with 2 s of fade: most of every slot is a
+    // blend, which is what makes this observable in a sample of frames.
+    const fade = await postJson(`${serve.base}/content`, {
+      v: 1, kind: 'gallery', interval: 3, gap: 0, transition: 'fade', transitionSec: 2,
+    });
+    assert.equal(fade.status, 200);
+
+    const mid = await frameWhere(serve, (s) => (frameKind(s) === 'mid' ? s : null), 30_000);
+    assert.ok(mid, 'a fade between two drawings must put a picture on the wall that the gallery never saved');
+
+    // A wipe has an edge: one drawing on one side, the other on the other.
+    // Asserting the shape, not the color, is what distinguishes a wipe from a
+    // fade - both are "in-between", only one has a seam travelling.
+    const wipe = await postJson(`${serve.base}/content`, {
+      v: 1, kind: 'gallery', interval: 3, gap: 0, transition: 'wipe', transitionSec: 2,
+    });
+    assert.equal(wipe.status, 200);
+    const edge = await frameWhere(serve, (s) => {
+      const left = at(s.rgba, 0, 10);
+      const right = at(s.rgba, GRID - 1, 10);
+      const blueish = (c) => c[2] > 200 && c[0] < 60;
+      const redish = (c) => c[0] > 200 && c[2] < 60;
+      return (blueish(left) && redish(right)) || (redish(left) && blueish(right)) ? s : null;
+    }, 30_000);
+    assert.ok(edge, 'a wipe must show one drawing on one side and the other on the other');
+
+    // The control for both assertions above: a hard cut has no middle. Without
+    // it, "an in-between frame appeared" would prove nothing about transitions.
+    const cut = await postJson(`${serve.base}/content`, {
+      v: 1, kind: 'gallery', interval: 3, gap: 0, transition: 'none', transitionSec: 0,
+    });
+    assert.equal(cut.status, 200);
+    // Drain the pipeline first: the feed is the LAST PUSHED frame, so the
+    // first sample after a mode change can still be the previous mode's
+    // transition. Waiting for a settled frame is what makes "no middle" a
+    // statement about the hard cut and not about the wipe that preceded it.
+    await frameWhere(serve, (s) => {
+      const k = frameKind(s);
+      return k === 'red' || k === 'blue' ? s : null;
+    }, 15_000);
+    const kinds = new Set();
+    const deadline = Date.now() + 12_000;
+    while (Date.now() < deadline) {
+      const shot = await frame(serve);
+      if (shot !== null) kinds.add(frameKind(shot));
+      await sleep(100);
+    }
+    assert.ok(kinds.has('red') && kinds.has('blue'), `a hard cut still cycles, saw ${JSON.stringify([...kinds])}`);
+    assert.ok(!kinds.has('mid'), `a hard cut has no in-between frame, saw ${JSON.stringify([...kinds])}`);
   } finally {
     if (proc !== null) proc.kill();
     await serve.stop();
