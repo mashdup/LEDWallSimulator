@@ -5,6 +5,9 @@ import {
   CONTENT_PROTOCOL_V,
   CONTENT_KINDS,
   ANIM_NAMES,
+  GAP_ANIM_NAMES,
+  GALLERY_DEFAULTS,
+  gallerySlot,
   makeMessage,
   parseMessage,
 } from '../core/content-protocol.js';
@@ -100,4 +103,59 @@ test('parseMessage strips unknown fields from a legal envelope', () => {
   // only what the kinds define, so a stray payload never reaches the canvas.
   const m = parseMessage({v: 1, kind: 'clear', smuggled: 'exec()'});
   assert.deepEqual(m, {v: 1, kind: 'clear'});
+});
+
+test('the gallery carries a break: gap seconds and which animation fills them', () => {
+  assert.deepEqual(makeMessage('gallery', {interval: 8, gap: 5, gapAnim: 'rain'}),
+    {v: 1, kind: 'gallery', interval: 8, gap: 5, gapAnim: 'rain'});
+  // gap 0 is legal and means no break - the gallery is plain cycling again.
+  assert.deepEqual(makeMessage('gallery', {gap: 0}), {v: 1, kind: 'gallery', gap: 0});
+  // 'none' is a name here, and every anim name is: the select is built from
+  // this list, so a control page can never offer a break the wall refuses.
+  assert.deepEqual(GAP_ANIM_NAMES, ['none', ...ANIM_NAMES]);
+  assert.deepEqual(makeMessage('gallery', {gapAnim: 'none'}), {v: 1, kind: 'gallery', gapAnim: 'none'});
+  for (const bad of [{gap: -1}, {gap: 601}, {gap: 1.5}, {gap: '5'}, {gap: null},
+                     {gapAnim: 'dancing'}, {gapAnim: 5}, {gapAnim: ''}]) {
+    assert.throws(() => makeMessage('gallery', bad), RangeError, JSON.stringify(bad));
+  }
+});
+
+test('the default break is a real animation, not a dark wall', () => {
+  assert.ok(GALLERY_DEFAULTS.gap > 0, 'a gallery with no break has no break to configure');
+  assert.ok(GAP_ANIM_NAMES.includes(GALLERY_DEFAULTS.gapAnim));
+  assert.notEqual(GALLERY_DEFAULTS.gapAnim, 'none');
+  assert.ok(GALLERY_DEFAULTS.interval > 0);
+});
+
+test('gallerySlot is the whole cadence as arithmetic on the shared clock', () => {
+  // Two drawings, 8 s each, 5 s of rain between: period 26, and the cycle
+  // repeats exactly - so a page that loads mid-cycle lands in the same slot.
+  const at = (t) => gallerySlot(t, 2, 8, 5, 'rain');
+  assert.deepEqual(at(0), {drawing: 0, anim: null});
+  assert.deepEqual(at(7.9), {drawing: 0, anim: null});
+  assert.deepEqual(at(8), {drawing: -1, anim: 'rain'});
+  assert.deepEqual(at(12.9), {drawing: -1, anim: 'rain'});
+  assert.deepEqual(at(13), {drawing: 1, anim: null});
+  assert.deepEqual(at(20.9), {drawing: 1, anim: null});
+  assert.deepEqual(at(21), {drawing: -1, anim: 'rain'});
+  assert.deepEqual(at(26), at(0), 'the cycle must repeat, not drift');
+  assert.deepEqual(at(26 * 1000 + 3), at(3), 'and stay in phase after an hour');
+
+  // gap 0 is the old cadence exactly: floor(t / interval) % n.
+  for (const t of [0, 4, 8, 12, 100, 3601]) {
+    assert.deepEqual(gallerySlot(t, 3, 5, 0, 'rain'), {drawing: Math.floor(t / 5) % 3, anim: null});
+  }
+
+  // gapAnim 'none' is a dark break, which is what "no animation" means here.
+  assert.deepEqual(gallerySlot(8, 2, 8, 5, 'none'), {drawing: -1, anim: null});
+
+  // An empty gallery is dark, and never an index into an empty list.
+  assert.deepEqual(gallerySlot(0, 0, 8, 5, 'rain'), {drawing: -1, anim: null});
+  assert.deepEqual(gallerySlot(123, -3, 8, 5, 'rain'), {drawing: -1, anim: null});
+
+  // A renderer must never throw on a bad cadence: the gate rejects messages,
+  // this survives them. Negative time is real too - a clock skew.
+  assert.deepEqual(gallerySlot(-1, 2, 8, 5, 'rain'), {drawing: -1, anim: 'rain'});
+  assert.deepEqual(gallerySlot(0, 2, 0, -5, 'rain'), {drawing: 0, anim: null});
+  assert.deepEqual(gallerySlot(50, 2, 8, 5, 'rain'), gallerySlot(50, 2, 8, 5, 'rain'));
 });

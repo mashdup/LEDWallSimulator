@@ -16,7 +16,8 @@
  *   text    {text, color?, fps?, step?, loop?}   scroll a banner
  *   anim    {name: 'demo' | 'off'} start/stop the page's own demo
  *   pic     {pixels}  one 20x20 user drawing (hex RGBA wire form)
- *   gallery {interval?}  cycle the saved drawings on the server
+ *   gallery {interval?, gap?, gapAnim?}  cycle the saved drawings, with an
+ *            animation in the break between them
  */
 
 import { isPixelHex } from './drawings.js';
@@ -33,6 +34,51 @@ export const CONTENT_KINDS = ['clear', 'fill', 'rect', 'text', 'anim', 'pic', 'g
  * 'off' stops animation (black); 'demo' is the original bouncing block.
  */
 export const ANIM_NAMES = ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock', 'snitch', 'off'];
+
+/**
+ * What may fill the break between gallery drawings: every animation, plus
+ * 'none' for a wall that simply goes dark between pictures.
+ */
+export const GAP_ANIM_NAMES = ['none', ...ANIM_NAMES];
+
+/** The gallery cadence a page uses when it is told to "start the gallery" and nothing else is chosen. */
+export const GALLERY_DEFAULTS = { interval: 8, gap: 5, gapAnim: 'rain' };
+
+/**
+ * gallerySlot(tSec, n, interval, gap, gapAnim) -> {drawing, anim}
+ *
+ * The whole cadence as one pure function of the shared server clock, so the
+ * wall, a human's tab and a capture browser that loads fresh mid-cycle all land
+ * on the same slot of the same cycle. A slot is a drawing for `interval`
+ * seconds and then the break for `gap` seconds:
+ *
+ *   period = n * (interval + gap);  pos = t mod period
+ *   slot   = floor(pos / (interval + gap));  phase = pos - slot * (interval + gap)
+ *
+ * `gap` is clamped, not validated: this is a renderer's arithmetic on a clock,
+ * and a renderer must never throw in the middle of a frame. The protocol gate
+ * is what rejects a bad message; this is what survives one.
+ *
+ * Returns {drawing: index, anim: null} while a drawing shows, and
+ * {drawing: null, anim: 'rain'} (or anim: null for gapAnim 'none') in the
+ * break. n === 0 gives {drawing: -1, anim: null}: an empty gallery is dark.
+ */
+export function gallerySlot(tSec, n, interval = 8, gap = 0, gapAnim = 'none') {
+  const count = Number.isInteger(n) && n > 0 ? n : 0;
+  if (count === 0) return { drawing: -1, anim: null };
+  const show = Math.max(1, Number(interval) || 1);
+  const brk = Math.max(0, Number(gap) || 0);
+  if (brk === 0) {
+    return { drawing: Math.floor(tSec / show) % count, anim: null };
+  }
+  const period = show + brk;
+  const pos = ((tSec % (count * period)) + count * period) % (count * period);
+  const slot = Math.floor(pos / period);
+  const phase = pos - slot * period;
+  return phase < show
+    ? { drawing: slot, anim: null }
+    : { drawing: -1, anim: gapAnim === 'none' ? null : gapAnim };
+}
 
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$|^[a-zA-Z]+$/;
 
@@ -114,11 +160,22 @@ export function parseMessage(data) {
     case 'gallery': {
       // The list lives on the server (GET /drawings); the message carries
       // only the cadence. The renderer picks the entry from the shared
-      // server clock, so every instance shows the same drawing.
+      // server clock, so every instance shows the same drawing - and the
+      // same break between drawings, for the same reason: the break is a
+      // slot in the same clock arithmetic, not a timer anyone starts.
       const m = {v: CONTENT_PROTOCOL_V, kind: 'gallery'};
       if (data.interval !== undefined) {
-        if (!Number.isInteger(data.interval) || data.interval < 1 || data.interval > 600) return null;
+        if (!intIn(data.interval, 1, 600)) return null;
         m.interval = data.interval;
+      }
+      if (data.gap !== undefined) {
+        // 0 is legal and means "no break": the gallery is back to plain cycling.
+        if (!intIn(data.gap, 0, 600)) return null;
+        m.gap = data.gap;
+      }
+      if (data.gapAnim !== undefined) {
+        if (!GAP_ANIM_NAMES.includes(data.gapAnim)) return null;
+        m.gapAnim = data.gapAnim;
       }
       return m;
     }

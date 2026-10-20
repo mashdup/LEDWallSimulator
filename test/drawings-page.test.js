@@ -254,6 +254,20 @@ test('the APP tab as frame driver shows drawings too, not the demo', async () =>
     }, 25_000);
     assert.ok(red, 'the app driver must paint the gallery drawing, not play the demo');
 
+    // The break, through the driver that actually runs the wall. The app tab is
+    // the frame driver in content-feed mode - it holds the keep-alive and is
+    // never throttled - so the break has to be resolved HERE, not only in a
+    // content tab. The driver's job is to say which slot of the cycle the clock
+    // is in and hand animFrame an anim state; animFrame's own gallery branch is
+    // black on purpose, so a driver that forgets plays a dark wall where the
+    // break animation belongs.
+    const withBreak = await postJson(`${serve.base}/content`, {
+      v: 1, kind: 'gallery', interval: 1, gap: 1, gapAnim: 'plasma',
+    });
+    assert.equal(withBreak.status, 200);
+    const breakSeen = await frameWhere(serve, (s) => (classify(s) === 'other' ? s : null), 25_000);
+    assert.ok(breakSeen, 'the app driver must paint the break animation, not a dark wall');
+
     // And a one-shot pic through the same driver.
     const pic = await postJson(`${serve.base}/content`, {
       v: 1, kind: 'pic', pixels: pixelsToHex(solid([0, 255, 0])),
@@ -331,6 +345,114 @@ test('the owner prunes the gallery with the token, and a page without it cannot'
     }, 10_000);
     assert.deepEqual(await (await fetch(`${serve.base}/drawings`)).json(), [],
       'the owner token prunes what a stranger cannot touch');
+  } finally {
+    if (proc !== null) proc.kill();
+    await serve.stop();
+    dropProfile(profile);
+    dropProfile(dir);
+  }
+});
+
+/**
+ * Classify a frame by counting its cells. Corners are not enough: an
+ * animation's corners are legitimately black at some phases (plasma fades, the
+ * demo bounces elsewhere), so a corner test reads a living animation as a dark
+ * wall. The two drawings here are uniform 400-cell fills, which is the only
+ * thing a frame can be "solid" against.
+ */
+function classify(shot) {
+  let lit = 0;
+  let red = 0;
+  let blue = 0;
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      const c = at(shot.rgba, x, y);
+      if (c[3] === 0) continue;
+      lit += 1;
+      if (c[0] === 255 && c[1] === 0 && c[2] === 0) red += 1;
+      else if (c[0] === 0 && c[1] === 0 && c[2] === 255) blue += 1;
+    }
+  }
+  if (lit === 0) return 'dark';
+  if (red === GRID * GRID) return 'red';
+  if (blue === GRID * GRID) return 'blue';
+  return 'other';
+}
+
+/**
+ * Watch the feed for `ms` and return every frame kind seen, in order of first
+ * sight. `stop` is a predicate on the set, not a size: a frame that is dark
+ * counts too (the list fetch, the first tick of a drawing that has not
+ * arrived), so "three kinds" is not the same as "the cycle is proven".
+ */
+async function watchKinds(serve, ms, stop = (seen) => seen.size >= 3) {
+  const seen = new Set();
+  const order = [];
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !stop(order)) {
+    const shot = await frame(serve);
+    if (shot !== null) {
+      const k = classify(shot);
+      if (!seen.has(k)) { seen.add(k); order.push(k); }
+    }
+    await sleep(100);
+  }
+  return order;
+}
+
+test('the gallery takes a break: an animation fills the gap between drawings', async () => {
+  const chrome = findChrome();
+  if (chrome === null) return;
+
+  const dir = mkdtempSync(join(tmpdir(), 'omp-break-'));
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json'), ...noGuards()]);
+  const dbgPort = await freePort();
+  const profile = mkdtempSync(join(tmpdir(), 'omp-break-profile-'));
+  let proc = null;
+
+  try {
+    const red = await postJson(`${serve.base}/drawings`, { name: 'red', pixels: pixelsToHex(solid([255, 0, 0])) });
+    const blue = await postJson(`${serve.base}/drawings`, { name: 'blue', pixels: pixelsToHex(solid([0, 0, 255])) });
+    assert.ok(red.ok && blue.ok);
+
+    const browser = await openBrowser(chrome, dbgPort, profile);
+    proc = browser.proc;
+    const cdp = browser.cdp;
+    const tab = await cdp.openTab(`${serve.base}/content.html?wall=1`);
+    await waitFor(async () => {
+      const t = await cdp.eval(tab, 'document.getElementById("status").textContent').catch(() => '');
+      return /demo/.test(t) ? t : null;
+    });
+
+    // One second of drawing, one second of plasma, twice round: a 4 s cycle.
+    const start = await postJson(`${serve.base}/content`, {
+      v: 1, kind: 'gallery', interval: 1, gap: 1, gapAnim: 'plasma',
+    });
+    assert.equal(start.status, 200);
+
+    const seen = await watchKinds(serve, 30_000, (o) => o.includes('red') && o.includes('blue') && o.includes('other'));
+    for (const k of ['red', 'blue', 'other']) {
+      assert.ok(seen.includes(k), `the cycle must contain ${k}; saw ${JSON.stringify(seen)}`);
+    }
+
+    // The status names the break too: a wall that animates silently is a wall
+    // nobody can explain to a guest.
+    const status = await waitFor(async () => {
+      const t = await cdp.eval(tab, 'document.getElementById("status").textContent').catch(() => '');
+      return /gallery break/.test(t) ? t : null;
+    }, 10_000);
+    assert.match(status, /gallery break · plasma/);
+
+    // gapAnim 'none' is the same cadence with a dark gap - the break is a
+    // duration, and what fills it is a choice.
+    const plain = await postJson(`${serve.base}/content`, {
+      v: 1, kind: 'gallery', interval: 1, gap: 1, gapAnim: 'none',
+    });
+    assert.equal(plain.status, 200);
+    const dark = await watchKinds(serve, 30_000, (o) => o.includes('red') && o.includes('blue') && o.includes('dark'));
+    for (const k of ['red', 'blue', 'dark']) {
+      assert.ok(dark.includes(k), `a dark break must show ${k}; saw ${JSON.stringify(dark)}`);
+    }
   } finally {
     if (proc !== null) proc.kill();
     await serve.stop();

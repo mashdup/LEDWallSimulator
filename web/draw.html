@@ -102,6 +102,9 @@
 
     <div class="row">
       <label>Gallery every <input id="interval" type="number" min="1" max="600" value="8"> s</label>
+      <label>break <input id="gap" type="number" min="0" max="600" value="5"> s
+        <select id="gapAnim"></select>
+      </label>
       <button id="gallery" type="button">Start gallery</button>
     </div>
 
@@ -124,7 +127,7 @@
 
 <script type="module">
 import { GRID, pixelsToHex, pixelsFromHex } from '../core/drawings.js';
-import { makeMessage } from '../core/content-protocol.js';
+import { makeMessage, GAP_ANIM_NAMES, GALLERY_DEFAULTS } from '../core/content-protocol.js';
 import { createEditor, flatPaint, DEFAULT_PALETTE, loadRecent, saveRecent } from './draw-editor.js';
 
 const $ = (id) => document.getElementById(id);
@@ -244,12 +247,30 @@ $('save').addEventListener('click', async () => {
   }
 });
 
+// The break between drawings: an animation from the wall's own library, chosen
+// from the same list the protocol validates (so this select can never offer a
+// name the wall would refuse), and timed by the same server clock as the
+// drawings - every renderer is in the break at the same second.
+const gapAnim = $('gapAnim');
+for (const name of GAP_ANIM_NAMES) {
+  const o = document.createElement('option');
+  o.value = name;
+  o.textContent = name === 'none' ? 'dark' : name;
+  gapAnim.append(o);
+}
+gapAnim.value = GALLERY_DEFAULTS.gapAnim;
+$('gap').value = String(GALLERY_DEFAULTS.gap);
+$('interval').value = String(GALLERY_DEFAULTS.interval);
+
 $('gallery').addEventListener('click', async () => {
-  const interval = Math.max(1, Math.min(600, Number($('interval').value) || 8));
+  const interval = Math.max(1, Math.min(600, Number($('interval').value) || GALLERY_DEFAULTS.interval));
+  const gap = Math.max(0, Math.min(600, Number($('gap').value) || 0));
+  const anim = GAP_ANIM_NAMES.includes(gapAnim.value) ? gapAnim.value : 'none';
   $('interval').value = String(interval);
+  $('gap').value = String(gap);
   try {
-    await post('/content', JSON.stringify(makeMessage('gallery', { interval })));
-    set(`gallery: every ${interval} s`);
+    await post('/content', JSON.stringify(makeMessage('gallery', { interval, gap, gapAnim: anim })));
+    set(`gallery: every ${interval} s${gap > 0 ? ` + ${gap} s of ${anim}` : ''}`);
   } catch (err) {
     set(`gallery failed: ${err.message}`, false);
   }

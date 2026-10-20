@@ -60,6 +60,7 @@ import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
 import { Panel, Scroller } from '../core/index.js';
 import { GRID, pixelsFromHex } from '../core/drawings.js';
+import { gallerySlot } from '../core/content-protocol.js';
 import { Banner } from './banner.js';
 /*
  * WALL — the drawing API for this page's canvas, sized to the panel.
@@ -484,10 +485,11 @@ function paintPixels(hex) {
 }
 
 // The gallery: the entries live on the server (GET /drawings), and WHICH
-// one is showing is a pure function of the shared server clock -
-// floor(t / interval) % n - so the wall, a human's tab, and a capture
-// browser that loads fresh mid-cycle all land on the same drawing. The
-// cache is by id, so a new entry never shifts the pixels an id maps to.
+// one is showing is a pure function of the shared server clock (gallerySlot,
+// in core) - so the wall, a human's tab, and a capture browser that loads
+// fresh mid-cycle all land on the same drawing, and on the same break between
+// drawings. The cache is by id, so a new entry never shifts the pixels an id
+// maps to.
 const gallery = { metas: [], fetchedAt: 0, cache: new Map(), inflight: null, pending: new Set(), label: '' };
 
 async function galleryRefresh(force = false) {
@@ -505,32 +507,43 @@ async function galleryRefresh(force = false) {
   return gallery.inflight;
 }
 
-function galleryIndex(t) {
-  const n = gallery.metas.length;
-  if (n === 0) return -1;
-  const intervalMs = (state.interval ?? 5) * 1000;
-  return Math.floor((t * 1000) / intervalMs) % n;
+function gallerySlotNow(t) {
+  return gallerySlot(t, gallery.metas.length, state.interval ?? 5, state.gap ?? 0, state.gapAnim ?? 'none');
 }
 
 function galleryDraw(t) {
   galleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
-  const idx = galleryIndex(t);
-  WALL.clear();
-  if (idx < 0) {
-    if (gallery.label !== 'gallery: empty') {
-      gallery.label = 'gallery: empty';
-      setOutput(gallery.label);
+  const slot = gallerySlotNow(t);
+  // The break between drawings: an animation, from the same library the anim
+  // buttons use, chosen by the same clock arithmetic - so every renderer is in
+  // the break at the same second, and nobody "starts" it.
+  if (slot.anim !== null) {
+    animDraw(slot.anim, t);
+    const blabel = `gallery break · ${slot.anim}`;
+    if (blabel !== gallery.label) {
+      gallery.label = blabel;
+      setOutput(blabel);
     }
     return;
   }
-  const meta = gallery.metas[idx];
+  WALL.clear();
+  if (slot.drawing < 0) {
+    // Dark: an empty gallery, or a break with gapAnim 'none'.
+    const dlabel = gallery.metas.length === 0 ? 'gallery: empty' : 'gallery break · dark';
+    if (dlabel !== gallery.label) {
+      gallery.label = dlabel;
+      setOutput(dlabel);
+    }
+    return;
+  }
+  const meta = gallery.metas[slot.drawing];
   const hex = gallery.cache.get(meta.id);
   if (hex === undefined) {
     galleryFetch(meta.id);
     return; // this tick stays black; the pixels land on the next one
   }
   paintPixels(hex);
-  const label = `gallery ${idx + 1}/${gallery.metas.length}${meta.name ? ' · ' + meta.name : ''}`;
+  const label = `gallery ${slot.drawing + 1}/${gallery.metas.length}${meta.name ? ' · ' + meta.name : ''}`;
   if (label !== gallery.label) {
     gallery.label = label;
     setOutput(label);

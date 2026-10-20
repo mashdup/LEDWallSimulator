@@ -191,3 +191,48 @@ flood from a network is not stopped, only slowed; and the gallery is still
 public. This is the honest shape of a self-hosted wall with a QR code in front
 of it — enough that an excited family cannot fill the wall, and the owner can
 always clear it.
+
+### 7.3 The break between drawings
+
+A gallery of family drawings on a wall is a slideshow, and a slideshow with no
+rest is a slideshow nobody watches. So the gallery has a **break**: each
+drawing shows for `interval` seconds, then the wall runs one of its own
+animations for `gap` seconds, then the next drawing.
+
+The break is **not a timer**. It is a slot in the same clock arithmetic as the
+drawings, in one pure function, `gallerySlot(tSec, n, interval, gap, gapAnim)`
+in `core/content-protocol.js`:
+
+```
+period = n * (interval + gap)
+pos    = t mod period
+slot   = floor(pos / period);  phase = pos - slot * period
+phase < interval  ->  drawing[slot]
+phase >= interval ->  the break, gapAnim
+```
+
+That is the whole design, and it buys the one property the wall needs: a
+capture browser that loads fresh at 19:04:07, a phone tab that has been open
+since 18:00, and the app tab that drives the frames all land in the same slot
+of the same cycle. Nobody "starts" the break, nobody syncs it, and a renderer
+that reloads mid-break is in the break. `gap: 0` is the old cadence, byte for
+byte (`floor(t / interval) % n`), and `gapAnim: 'none'` is a dark gap — the
+break is a duration, and what fills it is a choice.
+
+*The break is selectable from the animation library, and the select is built
+from `GAP_ANIM_NAMES` — the same list the protocol gate validates — so a
+control page can never offer a break the wall would refuse.* Defaults live in
+`GALLERY_DEFAULTS` (8 s of drawing, 5 s of `rain`), not in page markup: the
+markup's `value=` is a placeholder, the constant is the truth.
+
+*`animFrame()`'s `gallery` branch stays black, and the driver resolves the
+slot.* The pure generator never fetches the drawing list, so it cannot know
+which slot the clock is in; `web/app.js` and `web/content.html` do, and the app
+tab is the driver that runs the wall. A driver that forgets plays a dark wall
+where the break animation belongs — the test for that is in the app-tab test,
+because the app tab is the one the wall actually runs.
+
+*`gallerySlot` clamps, `parseMessage` rejects.* The gate is for senders; the
+slot function is a renderer's arithmetic on a clock, and a renderer must never
+throw in the middle of a frame. Negative time is real (clock skew), so `pos` is
+wrapped into `[0, period)` before it indexes anything.

@@ -60,13 +60,16 @@
 <div class="row">
   <a href="./draw.html"><button type="button">Draw…</button></a>
   <label>Gallery every <input id="interval" type="number" min="1" max="600" value="8"> s</label>
+  <label>break <input id="gap" type="number" min="0" max="600" value="5"> s
+    <select id="gapAnim"></select>
+  </label>
   <button id="gallery" type="button">Start gallery</button>
 </div>
 
 <p><output id="status">connecting…</output></p>
 
 <script type="module">
-import { makeMessage } from '../core/content-protocol.js';
+import { makeMessage, GAP_ANIM_NAMES, GALLERY_DEFAULTS } from '../core/content-protocol.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -104,11 +107,27 @@ for (const b of document.querySelectorAll('button[data-anim]')) {
 
 // The gallery: the entries live on the server, and which one is showing is a
 // pure function of the shared server clock, so this button only sets the
-// cadence - every content page (and the wall) picks the same drawing.
+// cadence - every content page (and the wall) picks the same drawing, and the
+// same animation in the break between drawings, for the same reason.
+const gapAnim = $('gapAnim');
+for (const name of GAP_ANIM_NAMES) {
+  const o = document.createElement('option');
+  o.value = name;
+  o.textContent = name === 'none' ? 'dark' : name;
+  gapAnim.append(o);
+}
+gapAnim.value = GALLERY_DEFAULTS.gapAnim;
+$('gap').value = String(GALLERY_DEFAULTS.gap);
+$('interval').value = String(GALLERY_DEFAULTS.interval);
+
 $('gallery').addEventListener('click', () => {
-  const interval = Math.max(1, Math.min(600, Number($('interval').value) || 8));
+  const interval = Math.max(1, Math.min(600, Number($('interval').value) || GALLERY_DEFAULTS.interval));
+  const gap = Math.max(0, Math.min(600, Number($('gap').value) || 0));
+  const anim = GAP_ANIM_NAMES.includes(gapAnim.value) ? gapAnim.value : 'none';
   $('interval').value = String(interval);
-  send(makeMessage('gallery', { interval }), `gallery every ${interval} s`);
+  $('gap').value = String(gap);
+  send(makeMessage('gallery', { interval, gap, gapAnim: anim }),
+    `gallery every ${interval} s${gap > 0 ? `, ${gap} s of ${anim} between` : ''}`);
 });
 
 // Enter in the text box sends, like a ticker.
@@ -126,7 +145,7 @@ async function watch() {
     const s = j.state;
     const what = s.kind === 'text' ? `text: ${s.text.slice(0, 32)}`
       : s.kind === 'anim' ? s.name
-      : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s · ${galleryCount} drawings`
+      : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s${(s.gap ?? 0) > 0 ? ` + ${s.gap} s of ${s.gapAnim ?? 'none'}` : ''} · ${galleryCount} drawings`
       : s.kind === 'pic' ? 'drawing (one shot)'
       : s.kind;
     set(`server rev ${j.rev} · ${what}`);

@@ -42,7 +42,7 @@ import { PageSource } from './page.js';
 import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
-import { ANIM_NAMES, makeMessage } from '../core/content-protocol.js';
+import { ANIM_NAMES, makeMessage, gallerySlot } from '../core/content-protocol.js';
 import { animFrame } from '../core/animations.js';
 
 const $ = (id) => document.getElementById(id);
@@ -795,13 +795,17 @@ function cGalleryFetch(id) {
     .then(() => { cGallery.pending.delete(id); });
 }
 
-/** The state to render this tick: the drawing the shared clock points at. */
+/** The state to render this tick: the drawing, or the break, the clock points at. */
 function cGalleryState(tSec) {
   cGalleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
-  const n = cGallery.metas.length;
-  if (n === 0) return { kind: 'clear' };
-  const idx = Math.floor((tSec * 1000) / ((cState.interval ?? 5) * 1000)) % n;
-  const meta = cGallery.metas[idx];
+  const slot = gallerySlot(tSec, cGallery.metas.length,
+    cState.interval ?? 5, cState.gap ?? 0, cState.gapAnim ?? 'none');
+  // The break between drawings is an anim state, so animFrame() draws it: the
+  // library is already pure, and the driver's job is only to say which slot of
+  // the cycle the clock is in.
+  if (slot.anim !== null) return { kind: 'anim', name: slot.anim };
+  if (slot.drawing < 0) return { kind: 'clear' };
+  const meta = cGallery.metas[slot.drawing];
   const hex = cGallery.cache.get(meta.id);
   if (hex === undefined) {
     cGalleryFetch(meta.id);
@@ -945,7 +949,7 @@ function mirrorContent(j) {
   const what = s.kind === 'text' ? `text: ${String(s.text).slice(0, 32)}`
     : s.kind === 'anim' ? s.name
     : s.kind === 'pic' ? 'drawing'
-    : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s · ${cGallery.metas.length} drawings`
+    : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s${(s.gap ?? 0) > 0 ? ` + ${s.gap} s of ${s.gapAnim ?? 'none'}` : ''} · ${cGallery.metas.length} drawings`
     : s.kind;
   setOutput($('contentOut'), `server rev ${j.rev} - showing: ${what}`);
   for (const b of $('contentAnims').children) {
