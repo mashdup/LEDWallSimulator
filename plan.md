@@ -236,3 +236,28 @@ because the app tab is the one the wall actually runs.
 slot function is a renderer's arithmetic on a clock, and a renderer must never
 throw in the middle of a frame. Negative time is real (clock skew), so `pos` is
 wrapped into `[0, period)` before it indexes anything.
+
+### 7.4 The owner is not a guest
+
+The guards in §7.2 are for strangers, and a token is proof of not being one. So
+`X-Wall-Owner` on `POST /drawings` **lifts the rate limit and the gallery cap**,
+and `draw.html` sends it on the save as well as the delete.
+
+The reason is the owner's actual workflow, not a loophole: twenty scanned
+family pictures, saved one after another from one laptop, is one address at ten
+seconds a save — twenty minutes of waiting, and a cap that fills on the owner's
+own fiftieth entry while they are curating. A limit on the person who owns the
+wall is a limit on the wrong person.
+
+Two consequences, both wanted:
+
+*The owner's posts do not consume the guest allowance.* The gate records what
+it gates. The owner saving twenty pictures cannot starve the wall for the next
+guest, and a guest gets the same first save, and the same 429 after it, whether
+the owner has posted or not.
+
+*The cap is the owner's own number, and the token is the only way to raise it
+at runtime.* `--max-drawings` protects the wall from the page on the QR code;
+it was never a ceiling on the person who set it.
+
+The token is not a client flag: a wrong token is a stranger, and gets the 429.

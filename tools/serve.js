@@ -11,8 +11,10 @@
 //   --rate-burst <n>      posts allowed per --rate-window (6; 0 off)
 //   --rate-window <ms>    burst window (60000)
 //   --max-drawings <n>    gallery size cap (200; 0 off)
-//   --owner-token <hex>   the DELETE token (else WALL_OWNER_TOKEN, else a random
-//                         one saved to data/owner-token.txt and printed at start)
+//   --owner-token <hex>   the owner key: prunes the gallery (X-Wall-Owner),
+//                         lifts the guards for the owner, and is the DELETE
+//                         token (else WALL_OWNER_TOKEN, else a random one saved
+//                         to data/owner-token.txt and printed at start)
 
 import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
@@ -529,6 +531,21 @@ function safeEqual(a, b) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/**
+ * isOwnerRequest(req) - the owner token, presented on any verb.
+ *
+ * The guards exist for strangers. An owner who has proven who they are is not
+ * a stranger, so the token also lifts the post limit and the gallery cap: the
+ * owner who scans twenty family pictures and saves them from one laptop is one
+ * address at ten seconds a save, which is a limit on the wrong person. The cap
+ * is the owner's own number, set on the command line, and the token is the
+ * only way to raise it at runtime.
+ */
+function isOwnerRequest(req) {
+  const hdr = req.headers['x-wall-owner'];
+  return owner.token !== '' && typeof hdr === 'string' && safeEqual(hdr, owner.token);
+}
+
 async function handleDrawings(req, res, url) {
   const seg = url.pathname.split('/');
   if (req.method === 'GET') {
@@ -555,14 +572,15 @@ async function handleDrawings(req, res, url) {
     // the server absorb 3.3 KB it is going to throw away. A client whose body
     // is still being written may see the reset instead of the 429 - both are
     // "refused", which is what the guest page shows.
-    const gate = rateGate(clientAddr(req));
+    const ownerPost = isOwnerRequest(req);
+    const gate = ownerPost ? { ok: true } : rateGate(clientAddr(req));
     if (!gate.ok) {
       const secs = Math.max(1, Math.ceil(gate.retryMs / 1000));
       respond(res, 429, { 'Retry-After': String(secs), 'Content-Type': 'text/plain; charset=utf-8' },
         `${gate.why} - try again in ${secs} s\n`);
       return;
     }
-    if (rate.maxEntries > 0 && drawings.list.length >= rate.maxEntries) {
+    if (!ownerPost && rate.maxEntries > 0 && drawings.list.length >= rate.maxEntries) {
       // 507: the gallery is the owner's resource, and the honest answer to a
       // full one is "full", not "saved".
       respond(res, 507, { 'Content-Type': 'text/plain; charset=utf-8' },
@@ -612,7 +630,7 @@ async function handleDrawings(req, res, url) {
         'X-Wall-Owner (the owner token) or X-Wall-Delete (the entry secret) is required\n');
       return;
     }
-    const isOwner = owner.token !== '' && typeof ownerHdr === 'string' && safeEqual(ownerHdr, owner.token);
+    const isOwner = isOwnerRequest(req);
     const i = drawings.list.findIndex((d) => d.id === seg[2]);
     if (i < 0) {
       respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no such drawing\n');
@@ -775,7 +793,8 @@ server.listen(port, HOST, () => {
   console.log('Web Serial needs this loopback URL — a LAN IP will not expose navigator.serial.');
   const burst = rate.burst > 0 ? `, burst ${rate.burst} per ${rate.windowMs / 1000} s` : '';
   const cap = rate.maxEntries > 0 ? `, cap ${rate.maxEntries} entries` : '';
-  console.log(`serve: guest posts: one per ${rate.spacingMs / 1000} s per address${burst}${cap}`);
+  console.log(`serve: guest posts: one per ${rate.spacingMs / 1000} s per address${burst}${cap}`
+    + '  (the owner token lifts all of this)');
   // Printed on purpose: this is a self-hosted wall on one machine, and the
   // owner needs the token to prune the gallery from draw.html. It is also in
   // data/owner-token.txt, so it survives the console scrolling away.

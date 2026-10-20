@@ -218,8 +218,8 @@ function set(text, ok = true) {
   out.classList.toggle('bad', !ok);
 }
 
-async function post(url, body, type = 'application/json') {
-  const r = await fetch(url, { method: 'POST', headers: { 'content-type': type }, body });
+async function post(url, body, type = 'application/json', headers = {}) {
+  const r = await fetch(url, { method: 'POST', headers: { 'content-type': type, ...headers }, body });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r;
 }
@@ -237,7 +237,11 @@ $('send').addEventListener('click', async () => {
 
 $('save').addEventListener('click', async () => {
   try {
-    const r = await post('/drawings', JSON.stringify({ name: $('name').value, pixels: pixelsToHex(editor.pixels) }));
+    // The owner token rides on the save: the post limit and the gallery cap are
+    // guards for strangers, and an owner who has proven who they are is saving
+    // a stack of pictures from one laptop, not flooding the wall.
+    const r = await post('/drawings', JSON.stringify({ name: $('name').value, pixels: pixelsToHex(editor.pixels) }),
+      'application/json', { 'x-wall-owner': ownerToken() });
     const j = await r.json();
     set(`saved: ${j.name || 'untitled'}`);
     $('name').value = '';

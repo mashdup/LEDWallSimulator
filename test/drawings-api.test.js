@@ -466,3 +466,54 @@ test('the owner token is generated once, saved beside the store, and stable', as
     rmSync(dir, { recursive: true, force: true, maxRetries: 12, retryDelay: 150 });
   }
 });
+
+test('the owner token lifts the post limit and the cap: the guards are for strangers', async () => {
+  const { file, dir } = tempData();
+  // Guards ON, at the shipped defaults, with a known token.
+  const serve = await serveOn(['--data', file, '--owner-token', 'test-owner-token']);
+  try {
+    const hex = pixelsToHex(emptyPixels());
+    const post = (base, owner) => fetch(`${base}/drawings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(owner ? { 'x-wall-owner': owner } : {}) },
+      body: json({ name: 'x', pixels: hex }),
+    });
+
+    // The owner's real workflow: a stack of family pictures, saved one after
+    // another from one laptop. One address, ten seconds a save, twenty
+    // minutes - a limit on the wrong person.
+    const owner = [];
+    for (let i = 0; i < 5; i++) owner.push((await post(serve.base, 'test-owner-token')).status);
+    assert.deepEqual(owner, [200, 200, 200, 200, 200], 'the owner is never rate limited');
+
+    // The gate is still there for everyone else, on the same address, one
+    // second later: lifting it is proof of being the owner, not a client flag.
+    // And the owner's posts do NOT consume the guest allowance - the owner
+    // saving twenty pictures cannot starve the wall for the next guest, and a
+    // guest gets the same first save and the same 429 after it.
+    assert.equal((await post(serve.base, null)).status, 200, 'a guest keeps their own first save');
+    assert.equal((await post(serve.base, null)).status, 429, 'the gate is untouched for strangers');
+    assert.equal((await post(serve.base, 'wrong-token')).status, 429, 'a wrong token is a stranger, not an owner');
+
+    // The cap is the owner's own number, and the token is the only way to
+    // raise it at runtime: the gallery is the owner's resource. A FRESH store -
+    // the cap is about the size of the gallery, and sharing this file would
+    // carry the five saves above into it and turn this into a test of cleanup.
+    const fresh = tempData();
+    const only = await serveOn(['--data', fresh.file, '--owner-token', 'test-owner-token',
+      '--rate-spacing', '0', '--rate-burst', '0', '--max-drawings', '2']);
+    try {
+      assert.equal((await post(only.base, 'test-owner-token')).status, 200);
+      assert.equal((await post(only.base, 'test-owner-token')).status, 200);
+      assert.equal((await post(only.base, null)).status, 507, 'the cap holds for strangers');
+      assert.equal((await post(only.base, 'test-owner-token')).status, 200, 'the owner can post past their own cap');
+      assert.equal((await (await fetch(`${only.base}/drawings`)).json()).length, 3);
+    } finally {
+      await only.stop();
+      rmSync(fresh.dir, { recursive: true, force: true, maxRetries: 12, retryDelay: 150 });
+    }
+  } finally {
+    await serve.stop();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 12, retryDelay: 150 });
+  }
+});
