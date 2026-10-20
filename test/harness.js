@@ -26,15 +26,32 @@ import { fileURLToPath } from 'node:url';
 
 const SERVE_SCRIPT = fileURLToPath(new URL('../tools/serve.js', import.meta.url));
 
-/** Poll a condition until it holds or the deadline passes; returns the final value. */
-export async function waitFor(predicate, timeoutMs = 10_000, stepMs = 100) {
-  const deadline = Date.now() + timeoutMs;
+/**
+ * Poll a condition until it holds, and return WHAT IT FOUND.
+ *
+ * The predicate is AWAITED. It used to be called without await, and a promise
+ * is always truthy - so every async predicate (the CDP kind, where the
+ * condition is a page eval) reported satisfied on the first poll, before the
+ * page had loaded, and the assertions that followed were racing a browser.
+ * Tests still passed with that, which is the worst kind of green: they passed
+ * because the next assertion happened to poll properly.
+ *
+ * The return value is the predicate's truthy value, not `true`: a caller that
+ * wants the page's status text, not just "it matched", asks for it. A predicate
+ * that returns a boolean returns a boolean. `waitForValue` is kept as an alias
+ * for the same contract.
+ */
+export async function waitFor(what, budgetMs = 15_000, stepMs = 150) {
+  const deadline = Date.now() + budgetMs;
   for (;;) {
-    if (predicate()) return true;
-    if (Date.now() >= deadline) return false;
+    const v = await what();
+    if (v) return v;
+    if (Date.now() >= deadline) throw new Error(`timeout waiting for ${what.label ?? 'condition'}`);
     await new Promise((done) => setTimeout(done, stepMs));
   }
 }
+
+export const waitForValue = waitFor;
 
 // freePort and the PNG decoder live in tools/ so serve.js, capture.js, bridge.js
 // and every suite share one implementation. Re-exported here because the suites
@@ -123,17 +140,6 @@ export async function pollJson(url, budgetMs = 15_000) {
       /* not up yet */
     }
     if (Date.now() > deadline) throw new Error(`timeout waiting for ${url}`);
-    await new Promise((r) => setTimeout(r, 150));
-  }
-}
-
-/** Poll a predicate until it returns a truthy value; returns that value. */
-export async function waitForValue(what, budgetMs = 15_000) {
-  const deadline = Date.now() + budgetMs;
-  for (;;) {
-    const v = await what();
-    if (v) return v;
-    if (Date.now() > deadline) throw new Error(`timeout waiting for ${what.label ?? 'condition'}`);
     await new Promise((r) => setTimeout(r, 150));
   }
 }

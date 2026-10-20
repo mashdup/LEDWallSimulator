@@ -315,3 +315,40 @@ never made. The wipe adds the assertion that only a wipe has — one drawing on
 one side, the other on the other. And the control is the hard cut: with
 `transitionSec: 0` there must be no in-between frame at all, which is what stops
 the first two assertions from proving nothing.
+
+### 7.6 The gallery, in the console
+
+The app page is the console a person actually has open at the wall, so the
+cadence lives there too: **every N s · break M s of ⟨anim⟩ · transition ⟨name⟩
+K s · Start gallery**, next to the animation buttons, with `Draw…` and `Guest
+page` links and the drawing count. The control page and the drawing page keep
+the same controls; all three send the same message, and the wall's state is the
+truth for all of them.
+
+The console **mirrors**: a cadence set from a phone opens the fields on the
+console, and the Start button lights when the wall is in gallery mode. The
+mirror runs on the poll that *changes* the state, never under the person typing.
+
+*The count is written where it is learned.* Mirroring it on a rev change showed
+"0 drawings" forever: the drawing list arrives a moment after the state that
+asks for it, and the state never changes again. So `renderGalleryCount()` runs
+in the list's own `.then`, and the status line no longer carries a number it
+cannot have — a panel that shows `0 drawings` next to `3 drawings` is two
+clocks, and this project has exactly one.
+
+### 7.7 The harness bug this surfaced
+
+`waitFor(predicate)` called the predicate **without awaiting it**. A promise is
+always truthy, so every async predicate — the CDP kind, where the condition is a
+page eval — reported satisfied on the first poll, before the page had loaded.
+
+The tests still passed. That is the worst kind of green: they passed because the
+*next* assertion happened to poll properly (`frameWhere`'s own loop, a status
+line that had time to update), so the readiness checks were decorative and a
+genuine race was invisible. The new console test exposed it by asserting a field
+value with no polling loop behind it.
+
+`waitFor` now awaits, returns the predicate's truthy **value** (not `true`), and
+throws on timeout; `waitForValue` is an alias, so both names are one contract.
+Every existing suite passes unchanged — which is the point: the fix did not make
+the tests true, it made the readiness checks real.

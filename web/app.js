@@ -42,7 +42,7 @@ import { PageSource } from './page.js';
 import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
-import { ANIM_NAMES, makeMessage, gallerySlot } from '../core/content-protocol.js';
+import { ANIM_NAMES, makeMessage, gallerySlot, GAP_ANIM_NAMES, TRANSITION_NAMES, GALLERY_DEFAULTS } from '../core/content-protocol.js';
 import { applyTransition } from '../core/transitions.js';
 import { animFrame } from '../core/animations.js';
 
@@ -776,6 +776,11 @@ function cGalleryRefresh(force = false) {
     .then((metas) => {
       cGallery.metas = Array.isArray(metas) ? metas : [];
       cGallery.fetchedAt = Date.now();
+      // The count is written where the number is learned. Mirroring it only on
+      // a content rev change would show "0 drawings" forever: the list arrives
+      // a moment after the state that asks for it, and the state does not
+      // change again.
+      renderGalleryCount();
     }, () => {
       // Server down: keep cycling the list we already have.
     })
@@ -954,6 +959,52 @@ for (const name of ANIM_NAMES) {
   $('contentAnims').append(b);
 }
 
+// The gallery, from the console. The cadence is the whole command: the entries
+// live on the server, and which one is showing - and where in the transition
+// the wall is - is arithmetic on the shared server clock, so this button only
+// sets the cadence and every renderer (the capture browser, a phone, this tab
+// driving the frames) lands in the same slot. The selects are built from the
+// lists the protocol gate validates, so the console can never offer a value the
+// wall would refuse.
+/** The gallery's own number, in the console. Written where it is learned. */
+function renderGalleryCount() {
+  setOutput($('galCount'), `${cGallery.metas.length} drawings`);
+}
+
+const galGapAnim = $('galGapAnim');
+for (const name of GAP_ANIM_NAMES) {
+  const o = document.createElement('option');
+  o.value = name;
+  o.textContent = name === 'none' ? 'dark' : name;
+  galGapAnim.append(o);
+}
+const galTrans = $('galTrans');
+for (const name of TRANSITION_NAMES) {
+  const o = document.createElement('option');
+  o.value = name;
+  o.textContent = name === 'none' ? 'hard cut' : name;
+  galTrans.append(o);
+}
+galGapAnim.value = GALLERY_DEFAULTS.gapAnim;
+galTrans.value = GALLERY_DEFAULTS.transition;
+$('galInterval').value = String(GALLERY_DEFAULTS.interval);
+$('galGap').value = String(GALLERY_DEFAULTS.gap);
+$('galTransSec').value = String(GALLERY_DEFAULTS.transitionSec);
+
+$('galStart').addEventListener('click', () => {
+  const interval = Math.max(1, Math.min(600, Number($('galInterval').value) || GALLERY_DEFAULTS.interval));
+  const gap = Math.max(0, Math.min(600, Number($('galGap').value) || 0));
+  const gapAnim = GAP_ANIM_NAMES.includes(galGapAnim.value) ? galGapAnim.value : 'none';
+  const transition = TRANSITION_NAMES.includes(galTrans.value) ? galTrans.value : 'none';
+  const transitionSec = Math.max(0, Math.min(30, Number($('galTransSec').value) || 0));
+  $('galInterval').value = String(interval);
+  $('galGap').value = String(gap);
+  $('galTransSec').value = String(transitionSec);
+  sendContent(makeMessage('gallery', { interval, gap, gapAnim, transition, transitionSec }),
+    `gallery every ${interval} s${gap > 0 ? `, ${gap} s of ${gapAnim} between` : ''}`
+    + `${transitionSec > 0 ? `, ${transition} ${transitionSec} s` : ', hard cut'}`);
+});
+
 // Mirror the server's current state into the status line and light the
 // matching animation button, so the panel shows what the wall shows.
 function mirrorContent(j) {
@@ -961,11 +1012,32 @@ function mirrorContent(j) {
   const what = s.kind === 'text' ? `text: ${String(s.text).slice(0, 32)}`
     : s.kind === 'anim' ? s.name
     : s.kind === 'pic' ? 'drawing'
-    : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s${(s.gap ?? 0) > 0 ? ` + ${s.gap} s of ${s.gapAnim ?? 'none'}` : ''}${(s.transitionSec ?? 0) > 0 ? ` · ${s.transition ?? 'fade'} ${s.transitionSec} s` : ''} · ${cGallery.metas.length} drawings`
+    : s.kind === 'gallery' ? `gallery · every ${s.interval ?? 5} s${(s.gap ?? 0) > 0 ? ` + ${s.gap} s of ${s.gapAnim ?? 'none'}` : ''}${(s.transitionSec ?? 0) > 0 ? ` · ${s.transition ?? 'fade'} ${s.transitionSec} s` : ''}`
     : s.kind;
   setOutput($('contentOut'), `server rev ${j.rev} - showing: ${what}`);
   for (const b of $('contentAnims').children) {
     b.classList.toggle('on', s.kind === 'anim' && b.dataset.anim === s.name);
+  }
+  $('galStart').classList.toggle('on', s.kind === 'gallery');
+  // The cadence fields mirror the server on the SAME poll that changes the
+  // state - so a console opened at the wall shows what the wall is doing,
+  // including a cadence set from the control page or the drawing page. This
+  // runs on a rev change, never under the person typing.
+  if (s.kind === 'gallery') {
+    $('galInterval').value = String(s.interval ?? GALLERY_DEFAULTS.interval);
+    $('galGap').value = String(s.gap ?? 0);
+    galGapAnim.value = GAP_ANIM_NAMES.includes(s.gapAnim) ? s.gapAnim : 'none';
+    galTrans.value = TRANSITION_NAMES.includes(s.transition) ? s.transition : 'none';
+    $('galTransSec').value = String(s.transitionSec ?? 0);
+  }
+  // The count is the one thing about the gallery the app does not already
+  // know: the entries live on the server, and the list arrives with the cycle.
+  // Only while the wall is IN the gallery - the list is the gallery's data, and
+  // a console that polls it in every mode is a second polling loop nobody asked
+  // for.
+  if (s.kind === 'gallery') {
+    renderGalleryCount();
+    if (cGallery.metas.length === 0) cGalleryRefresh(true);
   }
 }
 

@@ -111,6 +111,20 @@
         <button id="contentClear" type="button">Clear</button>
       </div>
       <div class="row" id="contentAnims"></div>
+      <div class="row">
+        <label>Gallery every <input id="galInterval" type="number" min="1" max="600" value="8"> s</label>
+        <label>break <input id="galGap" type="number" min="0" max="600" value="5"> s
+          <select id="galGapAnim"></select>
+        </label>
+        <label>transition <select id="galTrans"></select>
+          <input id="galTransSec" type="number" min="0" max="30" value="1"> s</label>
+        <button id="galStart" type="button">Start gallery</button>
+      </div>
+      <div class="row">
+        <a href="./draw.html"><button type="button">Draw…</button></a>
+        <a href="./public.html"><button type="button">Guest page</button></a>
+        <span class="note" id="galCount"></span>
+      </div>
       <output id="contentOut" class="mono"></output>
     </fieldset>
 

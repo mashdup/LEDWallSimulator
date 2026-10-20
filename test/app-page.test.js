@@ -6,7 +6,10 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { basename, join } from 'node:path';
 
-import { freePort, startServe } from './harness.js';
+import { findChrome } from '../tools/capture.js';
+import { freePort, startServe, openBrowser, waitFor, waitForValue, dropProfile, noGuards } from './harness.js';
+import { GAP_ANIM_NAMES, TRANSITION_NAMES } from '../core/content-protocol.js';
+import { emptyPixels, pixelsToHex } from '../core/drawings.js';
 
 /**
  * index.html boots — or says exactly why it did not.
@@ -222,5 +225,99 @@ test('content.html served boots its module: demo running, channel live', async (
     assert.match(inner(dom, 'status'), /demo/, 'content module must run and mark its status');
   } finally {
     await serve.stop();
+  }
+});
+
+/**
+ * The gallery, from the console.
+ *
+ * The app page is the console a person actually has open at the wall, so the
+ * cadence has to be here and not only on the control page. Two properties are
+ * worth a browser: the selects are built from the lists the protocol gate
+ * validates (a console that offers a name the wall refuses is a 400 with no
+ * explanation), and the fields MIRROR the server - a console opened at the wall
+ * shows the cadence somebody else set, because the wall's state is the truth.
+ */
+test('the console carries the gallery cadence, and mirrors the server that set it', async (t) => {
+  const chrome = findChrome();
+  if (chrome === null) { t.skip('no browser on this machine'); return; }
+
+  const dir = mkdtempSync(join(tmpdir(), 'omp-console-'));
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'd.json'), ...noGuards()]);
+  const dbgPort = await freePort();
+  const profile = mkdtempSync(join(tmpdir(), 'omp-console-profile-'));
+  let proc = null;
+
+  try {
+    const hex = pixelsToHex(emptyPixels());
+    for (const name of ['red', 'blue']) {
+      const r = await fetch(`${serve.base}/drawings`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name, pixels: hex }),
+      });
+      assert.ok(r.ok);
+    }
+
+    const browser = await openBrowser(chrome, dbgPort, profile);
+    proc = browser.proc;
+    const cdp = browser.cdp;
+    const tab = await cdp.openTab(`${serve.base}/index.html`);
+
+    // The app's own field, not the markup: the module body has to have run for
+    // the selects to have any options at all.
+    await waitFor(async () => cdp.eval(tab, `(() =>
+      document.querySelectorAll('#galGapAnim option').length > 1 ? 'ready' : null
+    )()`).catch(() => null), 15_000);
+
+    // The lists are the protocol's lists, in the browser that renders them.
+    const gapNames = JSON.parse(await cdp.eval(tab, `JSON.stringify([...document.querySelectorAll('#galGapAnim option')].map((o) => o.value))`));
+    const transNames = JSON.parse(await cdp.eval(tab, `JSON.stringify([...document.querySelectorAll('#galTrans option')].map((o) => o.value))`));
+    assert.deepEqual(gapNames, GAP_ANIM_NAMES, 'the break select is built from the gate list');
+    assert.deepEqual(transNames, TRANSITION_NAMES, 'and so is the transition select');
+
+    // Drive it the way a person does.
+    await cdp.eval(tab, `(() => {
+      document.getElementById('galInterval').value = '4';
+      document.getElementById('galGap').value = '2';
+      document.getElementById('galGapAnim').value = 'bars';
+      document.getElementById('galTrans').value = 'wipe';
+      document.getElementById('galTransSec').value = '2';
+      document.getElementById('galStart').click();
+      return 'sent';
+    })()`);
+
+    await waitFor(async () => {
+      const j = await (await fetch(`${serve.base}/content`)).json();
+      const s = j.state;
+      return s.kind === 'gallery' && s.interval === 4 && s.gap === 2 && s.gapAnim === 'bars'
+        && s.transition === 'wipe' && s.transitionSec === 2 ? 'sent' : null;
+    }, 10_000);
+
+    // A SECOND console: the mirror. It never touched a control, and it must
+    // show the cadence the first one set, because the wall's state is the
+    // truth and the panel is a readout of it.
+    const tab2 = await cdp.openTab(`${serve.base}/index.html`);
+    const mirrored = await waitForValue(async () => cdp.eval(tab2, `(() => {
+      const ok = document.getElementById('galInterval').value === '4'
+        && document.getElementById('galGap').value === '2'
+        && document.getElementById('galGapAnim').value === 'bars'
+        && document.getElementById('galTrans').value === 'wipe'
+        && document.getElementById('galTransSec').value === '2'
+        && document.getElementById('galStart').classList.contains('on');
+      return ok ? 'mirrored' : null;
+    })()`).catch(() => null), 15_000);
+    assert.equal(mirrored, 'mirrored', 'a console opened at the wall must show the cadence the wall is running');
+
+    // The count is the gallery's own number, and it arrives with the list.
+    const counted = await waitForValue(async () => {
+      const t2 = await cdp.eval(tab2, 'document.getElementById(\"galCount\").textContent').catch(() => '');
+      return /2 drawings/.test(t2) ? t2 : null;
+    }, 10_000);
+    assert.match(counted, /2 drawings/);
+  } finally {
+    if (proc !== null) proc.kill();
+    await serve.stop();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 12, retryDelay: 150 });
+    dropProfile(profile);
   }
 });
