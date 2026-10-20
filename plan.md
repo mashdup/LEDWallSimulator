@@ -290,14 +290,22 @@ flickers once per drawing. The first version of this file had exactly that bug:
 the name was checked before the progress, so `none` at `k = 1` returned the old
 frame — a hard cut that never completed.
 
-*One seam, on purpose.* The transition opens the **drawing**. The drawing →
-break seam stays a cut: a transition is for the boundary people experience as a
-hard swap (picture to picture), the break is a rest, and on a 20-cell panel a
-wipe into a moving pattern is a wipe of noise. Keeping one seam blended also
-keeps the blend inside the part of the slot it belongs to, which is what makes
-it finish — a transition longer than the drawing it opens is clamped, because a
-blend that runs past a boundary finds its own target changed under it halfway
-through.
+*Both seams, not one.* The cadence is one cycle, and a cycle that is soft at one
+boundary and hard at the next is exactly the asymmetry the eye reads as a fault:
+the wall **fades into** a drawing and then **falls off a cliff** out of it. So the
+transition opens every seam — `[break] → [drawing] → [break]` — with the same
+name and the same duration, and the drawing's exit blends into its own break.
+The target's frame is taken at the same `t` the renderer is drawing, so the
+break is a live picture during the blend: a wipe into `rain` is a wipe of a
+moving curtain, and `gapAnim: 'none'` makes the same seam a fade to black.
+
+*The clamp is half the drawing.* Both blends live inside the drawing's own
+window, so each finishes before the other starts: `transitionSec` is clamped to
+`(interval - 0.25) / 2`. A blend that runs past a boundary finds its own target
+changed under it halfway through — the frame it is blending toward is no longer
+the one it started from — and two overlapping blends have no defined result at
+all. With no break there is no exit seam to blend (the next slot's entry covers
+that boundary from the other side), so the cycle is still soft everywhere.
 
 *Both renderers compose the gallery from the pure generator.* `content.html` and
 `app.js` build the frame as `animFrame(slot)` blended with

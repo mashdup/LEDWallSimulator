@@ -479,6 +479,113 @@ test('the gallery takes a break: an animation fills the gap between drawings', a
  * wipe and false of a fade). The observable that fits a transition of any kind
  * is a frame that is neither drawing - a picture the gallery never saved.
  */
+/** A frame that is a drawing fading: all 400 cells lit, all of them the
+ * drawing's hue, and DIMMER than the drawing. A fade to a dark break and a fade
+ * in from one both look like this, so the phase of the cadence is what says
+ * which seam it is - see the test below. */
+function fading(shot) {
+  let lit = 0;
+  let sum = 0;
+  let offHue = 0;
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      const c = at(shot.rgba, x, y);
+      if (c[3] === 0) continue;
+      lit += 1;
+      sum += c[0];
+      if (c[1] > 40 || c[2] > 40) offHue += 1;
+    }
+  }
+  const all = GRID * GRID;
+  if (lit < all || offHue > 0) return false;
+  const mean = sum / all;
+  return mean > 40 && mean < 200;
+}
+
+test('the gallery transitions OUT of a drawing too, not only into it', async () => {
+  const chrome = findChrome();
+  if (chrome === null) return;
+
+  const dir = mkdtempSync(join(tmpdir(), 'omp-out-'));
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'drawings.json'), ...noGuards()]);
+  const dbgPort = await freePort();
+  const profile = mkdtempSync(join(tmpdir(), 'omp-out-profile-'));
+  let proc = null;
+
+  try {
+    // ONE drawing, and a DARK break: the only thing that fades red toward black
+    // is a seam with the break. interval 3, gap 3, transitionSec 2 clamped to
+    // 1.375 (half the drawing), so the cycle is
+    //   [0, 1.375) fade in from dark, [1.625, 3) fade out to dark, [3, 6) dark.
+    const red = await postJson(`${serve.base}/drawings`, { name: 'red', pixels: pixelsToHex(solid([255, 0, 0])) });
+    assert.ok(red.ok);
+    const r = await postJson(`${serve.base}/content`, {
+      v: 1, kind: 'gallery', interval: 3, gap: 3, gapAnim: 'off', transition: 'fade', transitionSec: 2,
+    });
+    assert.equal(r.status, 200);
+
+    const browser = await openBrowser(chrome, dbgPort, profile);
+    proc = browser.proc;
+    const cdp = browser.cdp;
+    const tab = await cdp.openTab(`${serve.base}/content.html?wall=1`);
+    await waitFor(async () => {
+      const t = await cdp.eval(tab, 'document.getElementById("status").textContent').catch(() => '');
+      return /gallery/.test(t) ? t : null;
+    });
+
+    // Attribute every pushed frame to the phase of the cadence it came from,
+    // from the server's own clock: the frame is the wall, the phase is the
+    // slot arithmetic, and the seam is the thing under test.
+    const phaseOf = (atMs) => {
+      const period = 3 + 3;
+      const pos = ((atMs / 1000) % period + period) % period;
+      return pos;
+    };
+    const sample = async () => {
+      const j = await (await fetch(`${serve.base}/content`)).json();
+      const shot = await frame(serve);
+      return shot === null ? null : { phase: phaseOf(j.at), fade: fading(shot) };
+    };
+
+    let out = 0;
+    let deepOut = 0;
+    const deadline = Date.now() + 25_000;
+    while (Date.now() < deadline) {
+      const s = await sample();
+      if (s !== null) {
+        if (s.phase >= 2.1 && s.phase < 2.9) {
+          deepOut += 1;
+          if (s.fade) out += 1;
+        }
+      }
+      await sleep(80);
+    }
+    assert.ok(deepOut >= 3, `the cadence was sampled across the out window, saw ${deepOut} samples`);
+    assert.ok(out >= 3, `the wall must be caught mid-fade as the drawing leaves for its break, saw ${out}/${deepOut} fading frames in the out window`);
+
+    // The control: the same cadence, no transition. Red, dark, red, dark - and
+    // never a dim red, in any window.
+    const cut = await postJson(`${serve.base}/content`, {
+      v: 1, kind: 'gallery', interval: 3, gap: 3, gapAnim: 'off', transition: 'none', transitionSec: 0,
+    });
+    assert.equal(cut.status, 200);
+    await sleep(1500); // let the previous mode's last frames drain
+    let seen = 0;
+    const hard = Date.now() + 12_000;
+    while (Date.now() < hard) {
+      const s = await sample();
+      if (s !== null && s.fade) seen += 1;
+      await sleep(80);
+    }
+    assert.equal(seen, 0, 'a hard cut has no fading frame: the transition is what makes it');
+  } finally {
+    if (proc !== null) proc.kill();
+    await serve.stop();
+    dropProfile(profile);
+    dropProfile(dir);
+  }
+});
+
 function frameKind(shot) {
   let lit = 0;
   let red = 0;

@@ -63,17 +63,29 @@ export const GALLERY_DEFAULTS = {
  *   slot   = floor(pos / period);  phase = pos - slot * period
  *   phase < interval ? drawing[slot] : the break
  *
- * The transition opens the DRAWING: for the first `transitionSec` seconds of a
- * slot the wall is between the frame it was on and this drawing, and the
- * descriptor says so - `from` is what the previous slot was showing when it
- * ended (its break, if there is one, otherwise its drawing), `k` is 0..1
- * progress. Outside that window `from` is null and `k` is 0.
+ * The transition opens EVERY seam of the slot, both ends of the drawing:
  *
- * The drawing -> break seam is deliberately a cut. A transition is for the
- * boundary people experience as a hard swap - picture to picture. The break is
- * a rest, and on a 20-cell panel a wipe into a moving pattern is a wipe of
- * noise. One blended seam also keeps the blend inside the part of the slot it
- * belongs to, which is what makes it finish.
+ *   [break] --transition--> [drawing] --transition--> [break]
+ *
+ * and the descriptor says so - `from` is the frame the wall was on, `to` is
+ * this slot's, `k` is 0..1 progress. Outside a transition window `from` is
+ * null and `k` is 0.
+ *
+ * Both seams, not just the first: the cadence is one cycle, and a cycle that
+ * is soft at one boundary and hard at the next is exactly the asymmetry the
+ * eye reads as a fault - the wall fades into a drawing and then falls off a
+ * cliff out of it. The blend at the end of a drawing runs INTO its own break,
+ * and the break's frame is taken at the same `t` the renderer is drawing, so
+ * the target is a live picture, not a frozen one: a wipe into `rain` is a wipe
+ * of a moving curtain. `gapAnim: 'none'` (a dark break) makes the same seam a
+ * fade to black, which is the nicer of the two.
+ *
+ * `transitionSec` is clamped to HALF the drawing, minus a quarter second, so
+ * both blends fit inside the part of the slot they belong to and finish before
+ * the other seam starts. A blend that runs past a boundary finds its own target
+ * changed under it halfway through - the frame it is blending toward is no
+ * longer the one it started from - and two overlapping blends have no defined
+ * result at all.
  *
  * `gap`, `transitionSec` and friends are CLAMPED, not validated: this is a
  * renderer's arithmetic on a clock, and a renderer must never throw in the
@@ -98,21 +110,31 @@ export function gallerySlot(tSec, n, interval = 8, gap = 0, gapAnim = 'none', tr
   const phase = pos - slot * period;
 
   if (brk > 0 && phase >= show) {
-    // The break: no transition, by the paragraph above.
+    // The break proper: the blend that opened it finished at this instant.
     return { ...breakSlot(), from: null, k: 0 };
   }
 
   const cur = { drawing: slot, anim: null };
-  // A transition longer than the drawing it opens is clamped: a blend that
-  // runs past the boundary would find its own target changed under it halfway
-  // through - the frame it is blending toward is no longer the one it started
-  // from.
-  const trans = Math.max(0, Math.min(Number(transitionSec) || 0, show - 0.25));
-  if (trans <= 0 || phase >= trans) return { ...cur, from: null, k: 0 };
-  // What the previous slot was showing when it ended: its break, if there is
-  // one, otherwise its drawing. That is the frame the wall was on.
-  const from = brk > 0 ? breakSlot() : { drawing: (slot - 1 + count) % count, anim: null };
-  return { ...cur, from, k: phase / trans };
+  // Half the drawing, so the seam at the start and the seam at the end of the
+  // same drawing each get their blend and never meet in the middle.
+  const trans = Math.max(0, Math.min(Number(transitionSec) || 0, (show - 0.25) / 2));
+  if (trans <= 0) return { ...cur, from: null, k: 0 };
+
+  // The seam at the START of the drawing: from what the previous slot was
+  // showing when it ended - its break, if there is one, otherwise its drawing.
+  if (phase < trans) {
+    const from = brk > 0 ? breakSlot() : { drawing: (slot - 1 + count) % count, anim: null };
+    return { ...cur, from, k: phase / trans };
+  }
+
+  // The seam at the END of the drawing: this slot's own break is the target,
+  // and the drawing is what the wall is leaving. `to` is the break, so the
+  // renderer paints the break and blends the drawing over it by 1-k.
+  if (brk > 0 && phase >= show - trans) {
+    return { ...breakSlot(), from: cur, k: (phase - (show - trans)) / trans };
+  }
+
+  return { ...cur, from: null, k: 0 };
 }
 
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$|^[a-zA-Z]+$/;

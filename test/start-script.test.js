@@ -104,7 +104,17 @@ async function runStart(args) {
     url,
     port: url === null ? null : Number(new URL(url).port),
     settled,
-    /** Tear the whole tree down the way the script promises to. */
+    /**
+     * Tear the whole tree down the way the script promises to.
+     *
+     * The wait POLLS the child's exit state, it does not await the 'exit'
+     * event. taskkill is synchronous, and on a killed tree the event can fire
+     * in the gap between the kill returning and the listener being attached -
+     * and a wait that can miss the event it is waiting for is a suite that
+     * hangs forever. This suite did: the file's last test finished, the child
+     * was dead, and the runner sat on it until the 120 s test timeout fired.
+     * Bounded and state-based, a teardown can only be slow, never stuck.
+     */
     async stop() {
       if (child.exitCode !== null || child.signalCode !== null) return;
       if (process.platform === 'win32') {
@@ -112,7 +122,10 @@ async function runStart(args) {
       } else {
         child.kill('SIGTERM');
       }
-      await new Promise((done) => child.once('exit', done));
+      const deadline = Date.now() + 5_000;
+      while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
+        await new Promise((done) => setTimeout(done, 50));
+      }
     },
   };
 }
