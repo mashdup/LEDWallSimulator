@@ -155,7 +155,9 @@ party that cannot start, and nothing in this repo's test suite can scan one.
 
 ```bash
 cd ~/ledwall-relay/repo && git pull && cd relay && docker compose up -d --build
-docker logs ledwall-relay          # the wall key, printed once at first boot
+docker logs ledwall-relay                       # the wall key (printed at first boot)
+docker compose exec -T ledwall-relay cat /data/wall-key.txt    # the key, any time
+docker compose exec -T ledwall-relay cat /data/owner-token.txt # the owner token
 ```
 
 Rollback: `docker compose down`, and delete the site block from the Caddyfile
