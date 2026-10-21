@@ -86,6 +86,8 @@ caddy reload   --config /opt/homebrew/etc/Caddyfile --adapter caddyfile
 | rate | wall | socket address | 10 s, burst 6/min, cap 200 | a flood on the local network |
 | body | relay / wall | Content-Length | 8 KB per drawing, 1 MB per wall batch | a body that is not a drawing |
 | `rate_limit` | Caddy | real IP | **off**: experimental features are not registered without `--experimental` | the internet at large |
+| sign-in | relay | real IP | burst 10/min | guessing the owner token |
+| session | relay | cookie (`SameSite=Strict`) | 12 h, in memory | everyone else, including CSRF |
 
 The address gate at the relay is deliberately loose. Behind Caddy, every phone
 in the room is one address: a 10-second spacing there is one drawing per ten
@@ -135,6 +137,57 @@ Docker's `-p` forwards to the container's eth0, and a server bound to loopback
 in there is unreachable ï¿½ the mapped port answers with an empty reply. The
 loopback discipline on this box is the **host** side of the mapping
 (`127.0.0.1:8091`), which is the half the internet sees.
+
+## The console, published
+
+The wall's control page is also served from here, on its own name:
+
+```
+https://wall-console.hoa.family/     sign in with the owner token
+https://wall.hoa.family/             the guest page (the QR code)
+```
+
+The laptop opens that URL, signs in, and connects COM8. **No local server.**
+
+That works because the Node process was never in the frame path: the browser
+generates the frames and hands them to `navigator.serial` itself, and HTTPS is a
+secure context, so the serial API exists on the public page exactly as it does
+on `http://127.0.0.1:8080`. COM8 belongs to the browser, not to the server.
+
+What the console then asks the relay for — and the reason all of it is behind
+the session — is the same API the console uses on the wall: `/content`,
+`/content/frame`, the gallery list, saving and pruning. The relay answers them
+from an in-memory content state plus the store. `/serial` answers `[]`: there is
+no Node serial port on this machine, and the console already treats an empty
+list as "nothing to warn about".
+
+**Nothing is served to an anonymous request.** Not the page, not `app.js`, not
+the content state, not the gallery list. The role is the **Host** header, not a
+path prefix, for a specific reason: the console imports `./app.js` and
+`../core/x.js`, and mounted at `/console` every one of those resolves outside
+the mount — the page would 404 its own brain. A dedicated host serves the page
+at `/` and the module graph resolves unchanged; and the guest host, the one on
+the printed cards, is a separate dispatch that never sees a console route.
+
+The session is `SameSite=Strict; HttpOnly; Secure`, twelve hours, in memory: a
+cross-site request carries no cookie, so there is no CSRF token to forget and no
+CORS surface. A restart signs everyone out. Sign-in is rate-gated per address,
+and a wrong token answers one sentence and mints nothing.
+
+An empty owner token means the console is **off**, and it says so — an
+unauthenticated control panel for a wall is not a configuration, it is an
+exposure.
+
+### Check it against the live box
+
+```bash
+WALL_OWNER_TOKEN=$(docker compose exec -T ledwall-relay cat /data/owner-token.txt)   node tools/check-console.mjs
+```
+
+Signs in from the form in a real headless Chromium, then asserts the things the
+idea rests on: `window.isSecureContext`, `navigator.serial.getPorts` is a
+function, `app.js` booted, the frame loop is painting, and the relay line speaks
+about the wall rather than a URL.
 
 ## The card on the table
 
