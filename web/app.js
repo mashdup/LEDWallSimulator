@@ -893,7 +893,13 @@ function renderRelay(j) {
     return;
   }
   const ago = j.syncedAt > 0 ? Math.max(0, Math.round((Date.now() - j.syncedAt) / 1000)) : -1;
-  setOutput(el, `relay: ${host} - synced${ago >= 0 ? ` ${ago} s ago` : ''} · ${j.count} drawings`, 'ok');
+  // Two different facts, two different words. On the wall's own server the
+  // client reports ITS last sync with the relay ("synced"). On the published
+  // console the same number is when the wall last visited THIS machine - the
+  // thing the owner needs to know there, where a stale number means the laptop
+  // is asleep while the queue grows.
+  const verb = j.url === '' ? 'the wall last visited' : 'synced';
+  setOutput(el, `relay: ${host} - ${verb}${ago >= 0 ? ` ${ago} s ago` : ' never'} · ${j.count} drawings`, 'ok');
 }
 
 async function pollRelay() {
