@@ -39,6 +39,8 @@ services:
       # mapping above (127.0.0.1:8091), which is what the internet sees.
       - RELAY_HOST=0.0.0.0
       - RELAY_DATA=/data/drawings.json
+      # The console's host name. Empty = the relay is the guest queue only.
+      - RELAY_CONSOLE_HOST=wall-console.hoa.family
       # Caddy is a real proxy, so X-Forwarded-For is the real client IP and the
       # relay may believe it. Without this flag every guest behind one NAT would
       # share one flood gate.

@@ -58,12 +58,12 @@ export {
   newDrawing,
   validateEntry,
 } from './drawings.js';
-// The store and the guards are the two servers' shared machinery. Exported
-// here for symmetry with the rest of core/, and DOM-free like the rest of it:
-// a browser page must not import them, and the guest page's test is what keeps
-// that true.
-export { DrawingStore } from './drawing-store.js';
-export { clientAddr, deviceKey, makeAuth, makeRateGate, resolveToken, safeEqual } from './guards.js';
+// NOTE: drawing-store.js and guards.js are deliberately NOT re-exported here.
+// core/index.js is what the BROWSER imports (web/app.js), and those two modules
+// are server-side: node:fs, node:crypto, node:path. Re-exporting them makes the
+// browser's module graph reach for Node built-ins and the console stops booting
+// — silently, as a missing module in a page nobody is watching. Node code
+// imports them directly: `../core/guards.js`, `../core/drawing-store.js`.
 export {
   CALIBRATION_PATTERNS,
   CALIBRATION_TIMING,

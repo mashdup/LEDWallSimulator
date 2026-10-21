@@ -69,3 +69,46 @@ wall.hoa.family {
 	#   }
 	# }
 }
+
+# ---- the console, on its own name ------------------------------------------
+#
+# The wall's control page, published. The laptop opens this URL and connects
+# COM8: the server is not in the frame path (the browser generates the frames
+# and hands them to navigator.serial itself), and HTTPS is a secure context, so
+# navigator.serial exists here exactly as it does on http://127.0.0.1:8080.
+#
+# The name is SEPARATE from the guest name on purpose. The console imports
+# './app.js' and '../core/x.js', which only resolve when the page is at the
+# root of its own host; and the guest name - the one on the printed cards - must
+# never reach a console route. The relay decides by Host header, so both hosts
+# can share one container and one port.
+#
+# Nothing here is served without a session: the page, app.js, the content state
+# and the gallery list are all behind the owner token. Sign-in is
+# POST /login, and the session cookie is SameSite=Strict, HttpOnly, Secure.
+#
+# DNS: one more CNAME for this name (hoa.family is on Porkbun), pointing at the
+# same target as wall.hoa.family. The certificate is issued by the same global
+# DNS-01 block on first request.
+
+wall-console.hoa.family {
+	header {
+		Cache-Control "no-store"
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:8091
+
+	# Frames are 20x20 PNGs (~1 KB) pushed at up to 30 fps when the app tab
+	# drives them, and a drawing is ~3.3 KB of hex. 1 MB is generous for both
+	# and still far too small to be interesting to anyone else.
+	request_body {
+		max_size 1MB
+	}
+
+	encode zstd gzip
+}

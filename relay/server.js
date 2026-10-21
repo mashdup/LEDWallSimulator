@@ -41,12 +41,14 @@
 
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { isPixelHex } from '../core/drawings.js';
 import { DrawingStore } from '../core/drawing-store.js';
+import { parseMessage } from '../core/content-protocol.js';
+import { makeConsole } from './console.js';
 import { clientAddr, deviceKey, makeAuth, makeRateGate, resolveToken, safeEqual } from '../core/guards.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -78,6 +80,13 @@ const PORT = flagNumber('--port', Number(env('RELAY_PORT') || 8080));
 const HOST = flag('--host', env('RELAY_HOST') !== '' ? env('RELAY_HOST') : '127.0.0.1');
 const DATA = flag('--data', env('RELAY_DATA') !== '' ? env('RELAY_DATA') : join(ROOT, 'data', 'relay-drawings.json'));
 const TRUST_PROXY = argv.includes('--trusted-proxy') || env('RELAY_TRUSTED_PROXY') === '1';
+
+/**
+ * The host that gets the console role (see relay/console.js for why the role is
+ * a Host and not a path prefix). Empty means no console anywhere: the relay
+ * stays the guest queue it always was.
+ */
+const CONSOLE_HOST = (flag('--console-host', env('RELAY_CONSOLE_HOST')) || '').toLowerCase();
 
 const store = new DrawingStore(DATA).load();
 const rate = makeRateGate({
@@ -116,6 +125,200 @@ const addrGate = makeRateGate({
 const owner = resolveToken({ argv, flag: '--owner-token', env: 'WALL_OWNER_TOKEN', file: join(dirname(DATA), 'owner-token.txt') });
 const wall = resolveToken({ argv, flag: '--wall-key', env: 'WALL_RELAY_KEY', file: join(dirname(DATA), 'wall-key.txt') });
 const auth = makeAuth(owner.token);
+
+/**
+ * The sign-in gate: a token is 32 hex characters and guessing it is hopeless,
+ * but a bot can still hammer the form, so the door is rate-limited per address.
+ * Same shared gate as everything else in this file.
+ */
+const loginGate = makeRateGate({ spacingMs: 0, burst: 10, windowMs: 60_000, maxEntries: 0 });
+
+const clientIp = (req) => clientAddr(req, { trustProxy: TRUST_PROXY });
+
+const consoleRole = makeConsole({
+  token: owner.token,
+  webRoot: join(ROOT, 'web'),
+  coreRoot: join(ROOT, 'core'),
+  log: (m) => console.log(m),
+  api: (req, res, url, path) => consoleApi(req, res, url, path),
+});
+
+/** The wall's last visit, for the console: "the queue is being fed". */
+const seen = { wall: 0 };
+
+/**
+ * The content state, in memory.
+ *
+ * Deliberately not on disk: the gallery is user data, this is the state of a
+ * running wall. A relay restart loses the cadence command, and the wall's own
+ * server still holds the truth - it is the one that pushes. No /capture here:
+ * that route launches a headless Chromium, which is a Node job on the wall, and
+ * the app tab is the frame driver.
+ */
+const content = { rev: 0, at: Date.now(), state: { v: 1, kind: 'demo' } };
+const frame = { png: null, at: 0, hash: '' };
+
+/**
+ * The console's API: the same routes the console uses on the wall's own server,
+ * answered here because in this topology there is no local server to answer
+ * them. Reached only through relay/console.js's role handler, which means only
+ * with a valid session - so unlike the wall's loopback server, these need no
+ * per-route auth of their own: there is exactly one door.
+ */
+async function consoleApi(req, res, url, path) {
+  const seg = path.split('/');
+
+  if (path === '/content' && req.method === 'GET') {
+    // `at` is the CURRENT time, not the last POST: renderers rebase their clock
+    // on every poll, so a POST-time `at` would snap every animation back to the
+    // moment of the last command - a sawtooth clock.
+    json(res, 200, { ...content, at: Date.now() });
+    return true;
+  }
+
+  if (path === '/content' && req.method === 'POST') {
+    const raw = await readBody(req, MAX_POST);
+    if (raw === null) {
+      text(res, 413, 'content command too large');
+      return true;
+    }
+    let m;
+    try {
+      m = parseMessage(JSON.parse(raw));
+    } catch {
+      m = null;
+    }
+    if (m === null) {
+      text(res, 400, 'not a legal content command');
+      return true;
+    }
+    content.rev += 1;
+    content.at = Date.now();
+    content.state = m;
+    json(res, 200, content);
+    return true;
+  }
+
+  if (path === '/content/frame' && req.method === 'POST') {
+    // The app tab pushes PNG at up to 30 fps when it drives the frames. This
+    // is the same contract as the wall's own server: latest wins, no queue.
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > MAX_FRAME) {
+        req.destroy();
+        text(res, 413, 'frame too large');
+        return true;
+      }
+      chunks.push(chunk);
+    }
+    const png = Buffer.concat(chunks);
+    frame.png = png;
+    frame.at = Date.now();
+    frame.hash = createHash('sha1').update(png).digest('hex').slice(0, 12);
+    json(res, 200, { bytes: png.length, hash: frame.hash });
+    return true;
+  }
+
+  if (path === '/content/frame' && req.method === 'GET') {
+    if (frame.png === null) {
+      text(res, 404, 'no frame pushed yet');
+      return true;
+    }
+    respond(res, 200, {
+      'Content-Type': 'image/png',
+      'Cache-Control': 'no-store',
+      'X-Capture-Hash': frame.hash,
+      'X-Capture-Ms': String(Date.now() - frame.at),
+    }, frame.png);
+    return true;
+  }
+
+  if (path === '/drawings' && req.method === 'GET') {
+    // The console's gallery list. Unlike the guest host - which answers 404 for
+    // this, so a stranger cannot enumerate the gallery - here a session has
+    // been proven, and draw.html needs the list to show what will cycle.
+    json(res, 200, store.metas());
+    return true;
+  }
+
+  if (path === '/drawings' && req.method === 'POST') {
+    // The owner saving a drawing from draw.html, on the console host. A session
+    // is the owner, so the guards are lifted exactly as X-Wall-Owner lifts them
+    // on the wall's own server: no rate gate, no gallery cap.
+    const raw = await readBody(req, MAX_POST);
+    if (raw === null) {
+      text(res, 413, 'drawing too large');
+      return true;
+    }
+    let body;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = null;
+    }
+    if (body === null || typeof body !== 'object' || !isPixelHex(body.pixels)) {
+      text(res, 400, 'not a legal drawing');
+      return true;
+    }
+    const e = store.add(body.name, body.pixels, 'local');
+    json(res, 200, { id: e.id, name: e.name, createdAt: e.createdAt, secret: e.secret });
+    return true;
+  }
+
+  if (seg[1] === 'drawings' && seg[2] !== undefined) {
+    const entry = store.byId(seg[2]);
+    if (req.method === 'GET') {
+      if (entry === null) {
+        text(res, 404, 'no such drawing');
+        return true;
+      }
+      json(res, 200, DrawingStore.publicEntry(entry));
+      return true;
+    }
+    if (req.method === 'DELETE') {
+      // A session IS the owner: this is the token path of the wall's own
+      // server, with a cookie standing in for X-Wall-Owner.
+      if (entry === null) {
+        text(res, 404, 'no such drawing');
+        return true;
+      }
+      store.remove(entry.id);
+      json(res, 200, { id: entry.id, removed: true, cursor: store.seq });
+      return true;
+    }
+  }
+
+  if (path === '/relay' && req.method === 'GET') {
+    // What the console's relay line means HERE: the wall is the one that dials
+    // out, so the question is "when did it last visit?". A stale number is the
+    // signal that the laptop is asleep or off the hotspot, and the queue is
+    // growing without a wall to show it.
+    json(res, 200, {
+      enabled: wall.token !== '',
+      url: '',
+      lastError: null,
+      syncedAt: seen.wall,
+      sent: 0,
+      cursor: store.seq,
+      count: store.size,
+      wallSeenAt: seen.wall,
+    });
+    return true;
+  }
+
+  if (path === '/serial' && req.method === 'GET') {
+    // There is no Node serial port on this machine: the wall's ESP32 is plugged
+    // into the laptop, and the browser talks to it directly. An empty list is
+    // the honest answer, and the console already treats it as "nothing to warn
+    // about" rather than as a failure.
+    json(res, 200, []);
+    return true;
+  }
+
+  return false;
+}
 
 /**
  * The three files this server will hand out, and the URL each one answers to.
@@ -172,11 +375,45 @@ function isWall(req) {
 
 const MAX_POST = 8192; // a full 20x20 hex drawing is ~3.3 KB; more is not a drawing
 const MAX_BATCH = 1 << 20; // a wall pushing a day of family pictures
+const MAX_FRAME = 1 << 20; // one 400x400 PNG; a frame that is not that is not a frame
+
+/**
+ * Is this request for the console role?
+ *
+ * The Host header, because the console imports './app.js' and '../core/x.js':
+ * mounted at a path prefix, every one of those resolves outside the mount and
+ * the page 404s its own brain. A dedicated host serves the page at / and the
+ * module graph resolves unchanged - and the guest host, which is what the QR
+ * code points at, gains no console route at all.
+ */
+function wantsConsole(req) {
+  if (CONSOLE_HOST === '') return false;
+  const host = String(req.headers.host ?? '').toLowerCase();
+  const name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0];
+  return name === CONSOLE_HOST;
+}
 
 async function handle(req, res) {
   const url = new URL(req.url ?? '/', `http://${HOST}`);
   const path = url.pathname;
   const seg = path.split('/');
+
+  // ---- the two roles -----------------------------------------------------
+  // The console host gets the console (and its API) and nothing else; every
+  // other host gets the guest surface. The split is the Host header, so the
+  // guest host cannot reach a console route even by guessing its path.
+  if (wantsConsole(req)) {
+    await consoleRole.handle(req, res, url, {
+      text, json, respond, readBody, clientIp, loginGate,
+    });
+    return;
+  }
+
+  // Any other host: the guest surface, and no console routes at all.
+  if (CONSOLE_HOST !== '' && (path === '/login' || path === '/logout')) {
+    text(res, 404, '404 Not Found');
+    return;
+  }
 
   if (req.method === 'GET' && path === '/healthz') {
     json(res, 200, { ok: true, count: store.size, seq: store.seq });
@@ -212,6 +449,9 @@ async function handle(req, res) {
       text(res, 401, 'X-Wall-Key is required');
       return;
     }
+    // The diet: every pull is the wall saying "I am here", which is the only
+    // way this machine can know. The console shows it as a staleness number.
+    seen.wall = Date.now();
     json(res, 200, store.since(Number(url.searchParams.get('since') ?? '0')));
     return;
   }
@@ -339,7 +579,14 @@ server.listen(PORT, HOST, () => {
     console.log('relay: no wall key - sync endpoints are closed, guests can still post');
   }
   if (owner.token !== '') {
-    console.log(`relay: owner token ${owner.file ? `in ${owner.file}` : 'from the environment'} (prunes the gallery)`);
+    console.log(`relay: owner token ${owner.file ? `in ${owner.file}` : 'from the environment'} (prunes the gallery, signs in the console)`);
+  }
+  if (CONSOLE_HOST === '') {
+    console.log('relay: console off (no --console-host): this relay is the guest queue only');
+  } else if (owner.token === '') {
+    console.log(`relay: WARNING ${CONSOLE_HOST} is configured but there is no owner token - the console refuses everyone`);
+  } else {
+    console.log(`relay: console at https://${CONSOLE_HOST}/ - sign in with the owner token, 12 h per sign-in`);
   }
   console.log(`relay: scan https://wall.hoa.family/ at the party${PORT === 443 ? '' : ` (behind Caddy, which terminates TLS)`}`);
 });

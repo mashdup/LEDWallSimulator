@@ -882,7 +882,12 @@ function renderRelay(j) {
     setOutput(el, 'relay: off (guests reach this wall over the local network only)', 'warn');
     return;
   }
-  const host = (() => { try { return new URL(j.url).host; } catch { return j.url; } })();
+  // The published console IS the relay, so there is no relay URL to show: the
+  // number that matters there is when the wall last visited (see GET /relay in
+  // relay/server.js). A wall's own server reports its relay's URL instead.
+  const host = j.url === '' ? 'this relay' : (() => {
+    try { return new URL(j.url).host; } catch { return j.url; }
+  })();
   if (j.lastError !== null) {
     setOutput(el, `relay: ${host} - ${j.lastError}`, 'err');
     return;

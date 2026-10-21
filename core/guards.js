@@ -148,8 +148,13 @@ export function makeAuth(token) {
  */
 export function resolveToken({ argv, flag, env, file, label = 'owner token' }) {
   const i = argv.indexOf(flag);
-  if (i >= 0 && typeof argv[i + 1] === 'string' && argv[i + 1].trim() !== '') {
-    return { token: argv[i + 1].trim(), file: null };
+  if (i >= 0) {
+    const given = typeof argv[i + 1] === 'string' ? argv[i + 1].trim() : '';
+    // Present and BLANK is a decision, not an omission: it means "no owner".
+    // Falling through to the env or to a generated file here would turn an
+    // explicit "off" into a working secret nobody was told about - which is
+    // the opposite of what the operator asked for.
+    return given === '' ? { token: '', file: null, off: true } : { token: given, file: null };
   }
   const fromEnv = (process.env[env] ?? '').trim();
   if (fromEnv !== '') return { token: fromEnv, file: null };
