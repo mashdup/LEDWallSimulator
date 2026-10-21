@@ -83,8 +83,9 @@ caddy reload   --config /opt/homebrew/etc/Caddyfile --adapter caddyfile
 |---|---|---|---|---|
 | politeness | relay | `x-wall-device` (a random id in localStorage) | 10 s, burst 6/min | one guest hammering save |
 | flood | relay | real client IP (X-Forwarded-For, `--trusted-proxy`) | burst 40/min, no spacing | a script; NOT a room of guests |
-| rate | wall | socket address | 10 s, burst 6/min | a flood on the local network |
-| `rate_limit` | Caddy | real IP | operator's choice | the internet at large |
+| rate | wall | socket address | 10 s, burst 6/min, cap 200 | a flood on the local network |
+| body | relay / wall | Content-Length | 8 KB per drawing, 1 MB per wall batch | a body that is not a drawing |
+| `rate_limit` | Caddy | real IP | **off**: experimental features are not registered without `--experimental` | the internet at large |
 
 The address gate at the relay is deliberately loose. Behind Caddy, every phone
 in the room is one address: a 10-second spacing there is one drawing per ten
@@ -131,7 +132,7 @@ node relay/server.js [--port 8080] [--host 127.0.0.1] [--data <file>]
 In a container, `RELAY_DATA`, `RELAY_TRUSTED_PROXY`, `RELAY_PORT`, `RELAY_HOST`
 do the same jobs. `RELAY_HOST=0.0.0.0` is required inside the container:
 Docker's `-p` forwards to the container's eth0, and a server bound to loopback
-in there is unreachable — the mapped port answers with an empty reply. The
+in there is unreachable ï¿½ the mapped port answers with an empty reply. The
 loopback discipline on this box is the **host** side of the mapping
 (`127.0.0.1:8091`), which is the half the internet sees.
 
@@ -139,7 +140,7 @@ loopback discipline on this box is the **host** side of the mapping
 
 `/card.html` is a print-friendly sign: the address in large type, in a box, and
 a dashed square where a printed QR code goes. Open it on the machine that serves
-the relay and print it — the address line reads `location.host`, so the paper
+the relay and print it ï¿½ the address line reads `location.host`, so the paper
 cannot disagree with the server. It has no fetches and no state; it is paper,
 and it is on the relay's file list because that is where the address is true.
 
