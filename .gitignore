@@ -34,3 +34,6 @@ data/
 # The relay's own local data (gallery, wall key, owner token) when run outside
 # a container. The keys in here pair the wall: never commit them.
 relay/data/
+
+# local credentials (SSH etc) - never commit
+.env
