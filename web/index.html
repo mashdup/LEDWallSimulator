@@ -125,6 +125,13 @@
         <a href="./public.html"><button type="button">Guest page</button></a>
         <span class="note" id="galCount"></span>
       </div>
+      <!-- The relay, read-only here. The wall DIALS OUT to it (relay/README.md:
+           the wall is never reached), and the pairing is a command-line flag,
+           so the console's job is to say what the wall is doing about it - not
+           to offer a field that would change the URL mid-party. -->
+      <div class="row">
+        <span class="note" id="relayOut">relay: checking…</span>
+      </div>
       <output id="contentOut" class="mono"></output>
     </fieldset>
 

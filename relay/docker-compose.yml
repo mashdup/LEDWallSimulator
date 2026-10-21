@@ -1,0 +1,45 @@
+# The public relay
+#
+# jarvis serves the guest page to the internet; the wall laptop dials OUT to it.
+# Nothing here is reachable from the guest page except the three files in
+# relay/server.js's STATIC table and the two verbs web/public.html calls.
+#
+#   docker compose -f relay/docker-compose.yml up -d
+#
+# Then in the Caddyfile, one site block (see relay/Caddyfile.snippet), and on
+# the wall:
+#
+#   npm run serve -- --relay https://wall.hoa.family --relay-key <the key below>
+#
+# The key: generated once, stored in ./data/wall-key.txt by the container, and
+# printed on the relay's stdout at startup. Copy it from `docker logs`.
+services:
+  ledwall-relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    container_name: ledwall-relay
+    restart: unless-stopped
+    # Loopback only, like every other service on this box: the public side of
+    # 443 belongs to Caddy, which terminates TLS and forwards here. A relay that
+    # binds 0.0.0.0 answers plain HTTP on its own port and skips the certificate.
+    ports:
+      - "127.0.0.1:8091:8080"
+    volumes:
+      # The gallery and the keys. A container rebuild must not delete a party's
+      # drawings, and a lost wall-key means re-pairing the wall by hand.
+      # The path must match RELAY_DATA below: a volume mounted at /data with the
+      # store at /app/data/relay-drawings.json persists nothing.
+      - ./data:/data
+    environment:
+      - RELAY_DATA=/data/drawings.json
+      # Caddy is a real proxy, so X-Forwarded-For is the real client IP and the
+      # relay may believe it. Without this flag every guest behind one NAT would
+      # share one flood gate.
+      - RELAY_TRUSTED_PROXY=1
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

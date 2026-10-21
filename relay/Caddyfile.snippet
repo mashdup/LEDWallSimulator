@@ -1,0 +1,52 @@
+# Caddy: the public door for the LED wall relay.
+#
+# Append this site block to /opt/homebrew/etc/Caddyfile (as root), then:
+#   caddy validate --config /opt/homebrew/etc/Caddyfile
+#   caddy reload  --config /opt/homebrew/etc/Caddyfile
+#
+# wall.hoa.family already resolves to this box (CNAME -> mashdup.ipv64.net) and
+# the *.hoa.family certificate is already issued via the Porkbun DNS-01 global
+# options, so this block needs no TLS setup of its own.
+#
+# The relay container binds 127.0.0.1:8091. Caddy owns :443 and terminates TLS;
+# the relay never sees a certificate, and never answers the internet directly.
+
+wall.hoa.family {
+	# The guest page is a QR code on a card, opened by strangers. Everything
+	# they send arrives through here, so the edge is where the per-IP limit
+	# lives: the relay behind this proxy sees one client address (this one),
+	# and its own gates are keyed on the page's device token and on the real IP
+	# that `trusted_proxies` forwards below.
+	rate_limit {
+		zone wall_post {
+			match {
+				method POST
+			}
+			# One drawing per minute per visitor, and a room of guests behind
+			# one NAT is not one visitor: this is keyed on the real IP.
+			group ip
+			window 1m
+			limit 20
+			key 429
+			retry_after 30s
+		}
+	}
+
+	# Say "believe the X-Forwarded-For that Caddy sets", and name the proxy:
+	# here, Caddy itself, on this box. The relay runs `--trusted-proxy` /
+	# RELAY_TRUSTED_PROXY=1 to match. Without both halves, the relay's flood
+	# gate counts this loopback address for every guest in the room.
+	reverse_proxy 127.0.0.1:8091 {
+		header_up X-Real-IP {remote_host}
+	}
+
+	# A guest's phone must never run a stale page at a party.
+	header {
+		Cache-Control "no-store"
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+
+	encode zstd gzip
+}

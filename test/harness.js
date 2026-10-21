@@ -25,6 +25,59 @@ import { rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const SERVE_SCRIPT = fileURLToPath(new URL('../tools/serve.js', import.meta.url));
+const RELAY_SCRIPT = fileURLToPath(new URL('../relay/server.js', import.meta.url));
+
+/**
+ * Boot a Node script as a child and wait for a line in its stdout.
+ *
+ * startServe and startRelay are the same shape - spawn, wait for the banner,
+ * tear the whole tree down - because the teardown is the part that is easy to
+ * get wrong twice: on Windows a plain kill() leaves the child's own children
+ * alive, and a relay that survives a test run holds the data file the next run
+ * is asserting against.
+ */
+async function startNode(script, args, banner, what) {
+  const child = spawn(process.execPath, [script, ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let log = '';
+  // `log` accumulates every chunk, and the banner is matched against the whole
+  // of it. Node's startup writes (the URL, the token, the serial probe) arrive
+  // in several chunks, so a suite that needs a line from the banner - the
+  // generated owner token, for one - has to read the accumulated log, not the
+  // newest chunk.
+  const live = () => log;
+  child.stdout.on('data', (chunk) => { log += chunk; });
+  child.stderr.on('data', (chunk) => { log += chunk; });
+  await new Promise((done, fail) => {
+    const timer = setTimeout(() => fail(new Error(`${what} did not start: ${live()}`)), 15_000);
+    const check = () => {
+      if (!banner.test(live())) return false;
+      clearTimeout(timer);
+      done();
+      return true;
+    };
+    child.stdout.on('data', check);
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      fail(new Error(`${what} exited early (${code}): ${live()}`));
+    });
+    check();
+  });
+  return {
+    log: () => log,
+    async stop() {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      if (process.platform === 'win32') {
+        spawnSync('taskkill', ['/F', '/T', '/PID', String(child.pid)], { stdio: 'ignore', windowsHide: true });
+      } else {
+        child.kill('SIGTERM');
+      }
+      await new Promise((done) => child.once('exit', done));
+    },
+  };
+}
 
 /**
  * Poll a condition until it holds, and return WHAT IT FOUND.
@@ -51,6 +104,18 @@ export async function waitFor(what, budgetMs = 15_000, stepMs = 150) {
   }
 }
 
+/**
+ * waitFor with a sentence attached to the failure.
+ *
+ * A timeout that says "timeout waiting for condition" is a debugging session;
+ * the same timeout that says what the condition was is a bug report. The label
+ * rides on the predicate because the predicate is the only place that knows.
+ */
+export function until(what, label) {
+  what.label = label;
+  return what;
+}
+
 export const waitForValue = waitFor;
 
 // freePort and the PNG decoder live in tools/ so serve.js, capture.js, bridge.js
@@ -70,42 +135,45 @@ export { PNG_SIGNATURE, pngSize, decodePng, rgbOf, rgbaOf } from '../tools/png.j
  * args are appended verbatim (e.g. ['--data', tmpFile]) so a suite can point
  * the drawings store at a temp path and never touch the repo's data/.
  */
+/**
+ * Boot tools/serve.js as a real child process on an ephemeral port.
+ *
+ * A child process rather than an in-process import because serve.js owns one
+ * Capture for its whole life (that is the point of it: every request reuses the
+ * same tab), and importing it into the test process would share that browser with
+ * every other suite in the run.
+ *
+ * args are appended verbatim (e.g. ['--data', tmpFile]) so a suite can point
+ * the drawings store at a temp path and never touch the repo's data/.
+ */
 export async function startServe(port, args = []) {
-  const child = spawn(process.execPath, [SERVE_SCRIPT, '--port', String(port), ...args], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
+  const r = await startNode(SERVE_SCRIPT, ['--port', String(port), ...args], /LED wall dev server: http/, 'serve.js');
+  return { base: `http://127.0.0.1:${port}`, log: r.log, stop: r.stop };
+}
+
+/**
+ * Boot relay/server.js. The relay is a plain HTTP server with no browser of its
+ * own, so it needs no special isolation - only the same teardown discipline.
+ */
+export async function startRelay(port, args = []) {
+  const r = await startNode(RELAY_SCRIPT, ['--port', String(port), '--host', '127.0.0.1', ...args], /LED wall relay: http/, 'relay/server.js');
+  return { base: `http://127.0.0.1:${port}`, log: r.log, stop: r.stop };
+}
+
+/** POST a JSON body and return the response, parsed lazily by the caller. */
+export async function postJson(url, body, headers = {}) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
   });
-  let log = '';
-  child.stdout.on('data', (chunk) => { log += chunk; });
-  child.stderr.on('data', (chunk) => { log += chunk; });
-  const ready = /LED wall dev server: http/;
-  await new Promise((done, fail) => {
-    const timer = setTimeout(() => fail(new Error(`serve.js did not start: ${log}`)), 15_000);
-    const check = () => {
-      if (!ready.test(log)) return false;
-      clearTimeout(timer);
-      done();
-      return true;
-    };
-    child.stdout.on('data', check);
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      fail(new Error(`serve.js exited early (${code}): ${log}`));
-    });
-    check();
-  });
-  return {
-    base: `http://127.0.0.1:${port}`,
-    async stop() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      if (process.platform === 'win32') {
-        spawnSync('taskkill', ['/F', '/T', '/PID', String(child.pid)], { stdio: 'ignore', windowsHide: true });
-      } else {
-        child.kill('SIGTERM');
-      }
-      await new Promise((done) => child.once('exit', done));
-    },
-  };
+  r.bodyText = await r.text();
+  try {
+    r.json = JSON.parse(r.bodyText);
+  } catch {
+    r.json = null;
+  }
+  return r;
 }
 
 export const captureQuery = (params) => new URLSearchParams(params).toString();

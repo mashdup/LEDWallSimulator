@@ -15,22 +15,31 @@
 //                         lifts the guards for the owner, and is the DELETE
 //                         token (else WALL_OWNER_TOKEN, else a random one saved
 //                         to data/owner-token.txt and printed at start)
+//
+// The public relay (a party where the phones are not on this LAN):
+//   --relay <url>         the relay to visit, e.g. https://wall.hoa.family
+//                         (the wall DIALS OUT: it is never reached)
+//   --relay-key <hex>     the X-Wall-Key the relay was paired with
+//   --relay-interval <ms> how often to visit (5000; backs off to 60000 offline)
 
 import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import { Capture, parseCaptureParams } from './capture.js';
 import { parseMessage } from '../core/content-protocol.js';
-import { newDrawing, validateEntry, isPixelHex, pixelsFromHex } from '../core/drawings.js';
+import { isPixelHex } from '../core/drawings.js';
+import { DrawingStore } from '../core/drawing-store.js';
+import { clientAddr, makeAuth, makeRateGate, resolveToken } from '../core/guards.js';
 import { isFetchablePort } from './ports.js';
 import { serialPorts, serialTakeOver } from './serial.js';
 import { FRAME_BYTES } from '../core/frame.js';
 import { DdpTransport } from './bridge.js';
+import { makeRelayClient, resolveRelay } from './relay-client.js';
 
 const HOST = '127.0.0.1';
 const DEFAULT_PORT = 8080;
@@ -74,6 +83,7 @@ function flagNumber(argv, name, dflt) {
 const VALUE_FLAGS = new Set([
   '--ddp', '--data', '--owner-token',
   '--rate-spacing', '--rate-burst', '--rate-window', '--max-drawings',
+  '--relay', '--relay-key', '--relay-interval',
 ]);
 
 /** Parse --port / PORT with the documented precedence: flag > env > default. */
@@ -392,47 +402,7 @@ function resolveDataFile(argv) {
   return i < 0 ? DATA_FILE : resolve(argv[i + 1] ?? DATA_FILE);
 }
 
-const drawings = { file: resolveDataFile(process.argv.slice(2)), list: [] };
-
-function loadDrawings() {
-  try {
-    const raw = JSON.parse(readFileSync(drawings.file, 'utf8'));
-    if (Array.isArray(raw)) drawings.list = raw.filter(validateEntry);
-  } catch {
-    // No file, junk file: an empty gallery, not a crash. The store is
-    // user data; a corrupt one is left on disk, not silently overwritten
-    // (it is only written after a successful mutation).
-  }
-}
-
-function saveDrawings() {
-  try {
-    mkdirSync(dirname(drawings.file), { recursive: true });
-    writeFileSync(drawings.file, JSON.stringify(drawings.list));
-  } catch (err) {
-    console.error(`serve: drawings not saved: ${err.message}`);
-  }
-}
-
-loadDrawings();
-
-/** The list without the pixel payloads: what GET /drawings answers. */
-function drawingMetas() {
-  return drawings.list.map(({ id, name, createdAt }) => ({ id, name, createdAt }));
-}
-
-/**
- * The public view of one entry: the pixels, and never the delete secret.
- *
- * The secret is handed to the creator ONCE, in the POST response, and stored
- * beside the entry. If GET /drawings/<id> echoed it, the gallery would be
- * deletable by every visitor - the list is public, so a guest could read the
- * secret of every entry in two requests. The store keeps it, the API never
- * serves it.
- */
-function publicEntry(e) {
-  return { id: e.id, name: e.name, pixels: e.pixels, createdAt: e.createdAt };
-}
+const drawings = new DrawingStore(resolveDataFile(process.argv.slice(2))).load();
 
 /**
  * The guest page's guards. web/public.html is handed to people with no account
@@ -452,84 +422,30 @@ function publicEntry(e) {
  * forged by exactly the client this limit exists for, and this server is
  * loopback-bound with no proxy in front of it that would set it truthfully.
  */
-const rate = {
+const rate = makeRateGate({
   spacingMs: flagNumber(process.argv.slice(2), '--rate-spacing', 10_000),
   burst: flagNumber(process.argv.slice(2), '--rate-burst', 6),
   windowMs: flagNumber(process.argv.slice(2), '--rate-window', 60_000),
   maxEntries: flagNumber(process.argv.slice(2), '--max-drawings', 200),
-};
+});
 
-const hits = new Map(); // address -> { last, times: [] }
-
-/**
- * rateGate(addr) -> {ok} | {ok:false, retryMs, why}.
- *
- * A REJECTED post records nothing: if it did, hammering the endpoint would push
- * one's own lockout further out, so a flood would be its own reward and a
- * legitimate guest who tapped twice would be locked for minutes.
- */
-function rateGate(addr) {
-  const now = Date.now();
-  if (hits.size > 32) { // one small record per address seen in the window
-    for (const [k, v] of hits) if (now - v.last > rate.windowMs) hits.delete(k);
-  }
-  const h = hits.get(addr) ?? { last: 0, times: [] };
-  hits.set(addr, h);
-  if (rate.spacingMs > 0 && now - h.last < rate.spacingMs) {
-    return { ok: false, retryMs: rate.spacingMs - (now - h.last), why: 'one at a time' };
-  }
-  if (rate.burst > 0) {
-    h.times = h.times.filter((t) => now - t < rate.windowMs);
-    if (h.times.length >= rate.burst) {
-      return { ok: false, retryMs: rate.windowMs - (now - h.times[0]), why: 'too many in a row' };
-    }
-  }
-  h.last = now;
-  h.times.push(now);
-  return { ok: true };
-}
-
-function clientAddr(req) {
-  return req.socket?.remoteAddress ?? '?';
-}
+const owner = resolveToken({
+  argv: process.argv.slice(2),
+  flag: '--owner-token',
+  env: 'WALL_OWNER_TOKEN',
+  file: join(dirname(drawings.file), 'owner-token.txt'),
+});
+const auth = makeAuth(owner.token);
 
 /**
- * The owner token: --owner-token <hex>, then WALL_OWNER_TOKEN, then a random
- * one persisted beside the store (data/owner-token.txt), so the owner can copy
- * it once and it survives every restart. An empty token DISABLES owner auth -
- * it is not a shared secret of "", and a guest sending an empty header must not
- * be handed the delete path.
+ * The relay client: this wall's side of the public queue (see
+ * tools/relay-client.js for why the wall dials out, and why offline is a
+ * normal state rather than an error). Off unless --relay names a relay.
  */
-function resolveOwnerToken(argv) {
-  const i = argv.indexOf('--owner-token');
-  if (i >= 0 && typeof argv[i + 1] === 'string' && argv[i + 1].trim() !== '') {
-    return { token: argv[i + 1].trim(), file: null };
-  }
-  const env = (process.env.WALL_OWNER_TOKEN ?? '').trim();
-  if (env !== '') return { token: env, file: null };
-  const file = join(dirname(drawings.file), 'owner-token.txt');
-  try {
-    const t = readFileSync(file, 'utf8').trim();
-    if (t !== '') return { token: t, file };
-  } catch { /* no file yet */ }
-  const fresh = randomBytes(16).toString('hex');
-  try {
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, `${fresh}\n`);
-  } catch (err) {
-    console.error(`serve: owner token not saved (${err.message}); this one lasts until restart`);
-  }
-  return { token: fresh, file };
-}
-
-const owner = resolveOwnerToken(process.argv.slice(2));
-
-/** Constant-time compare, length-guarded (timingSafeEqual throws on a mismatch). */
-function safeEqual(a, b) {
-  const x = Buffer.from(String(a));
-  const y = Buffer.from(String(b));
-  return x.length === y.length && timingSafeEqual(x, y);
-}
+const relayCfg = resolveRelay(process.argv.slice(2));
+const relay = relayCfg.url === '' ? null
+  : makeRelayClient({ store: drawings, url: relayCfg.url, key: relayCfg.key, intervalMs: relayCfg.intervalMs,
+      log: (m) => console.log(m) });
 
 /**
  * isOwnerRequest(req) - the owner token, presented on any verb.
@@ -538,12 +454,11 @@ function safeEqual(a, b) {
  * a stranger, so the token also lifts the post limit and the gallery cap: the
  * owner who scans twenty family pictures and saves them from one laptop is one
  * address at ten seconds a save, which is a limit on the wrong person. The cap
- * is the owner's own number, set on the command line, and the token is the
- * only way to raise it at runtime.
+ * is the owner's own number, set on the command line, and the token is the only
+ * way to raise it at runtime.
  */
 function isOwnerRequest(req) {
-  const hdr = req.headers['x-wall-owner'];
-  return owner.token !== '' && typeof hdr === 'string' && safeEqual(hdr, owner.token);
+  return auth.isOwner(req);
 }
 
 async function handleDrawings(req, res, url) {
@@ -552,15 +467,15 @@ async function handleDrawings(req, res, url) {
     // /drawings/<id> -> the full entry (the gallery renderer fetches the
     // pixels of one drawing per poll; the metas never carry pixels).
     if (seg[2] !== undefined) {
-      const e = drawings.list.find((d) => d.id === seg[2]);
+      const e = drawings.byId(seg[2]);
       if (e === undefined) {
         respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no such drawing\n');
       } else {
-        respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(publicEntry(e)));
+        respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(DrawingStore.publicEntry(e)));
       }
       return;
     }
-    respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(drawingMetas()));
+    respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(drawings.metas()));
     return;
   }
   if (req.method === 'POST') {
@@ -573,14 +488,14 @@ async function handleDrawings(req, res, url) {
     // is still being written may see the reset instead of the 429 - both are
     // "refused", which is what the guest page shows.
     const ownerPost = isOwnerRequest(req);
-    const gate = ownerPost ? { ok: true } : rateGate(clientAddr(req));
+    const gate = ownerPost ? { ok: true } : rate.check(clientAddr(req));
     if (!gate.ok) {
       const secs = Math.max(1, Math.ceil(gate.retryMs / 1000));
       respond(res, 429, { 'Retry-After': String(secs), 'Content-Type': 'text/plain; charset=utf-8' },
         `${gate.why} - try again in ${secs} s\n`);
       return;
     }
-    if (!ownerPost && rate.maxEntries > 0 && drawings.list.length >= rate.maxEntries) {
+    if (!ownerPost && rate.maxEntries > 0 && drawings.size >= rate.maxEntries) {
       // 507: the gallery is the owner's resource, and the honest answer to a
       // full one is "full", not "saved".
       respond(res, 507, { 'Content-Type': 'text/plain; charset=utf-8' },
@@ -608,16 +523,9 @@ async function handleDrawings(req, res, url) {
       respond(res, 400, { 'Content-Type': 'text/plain; charset=utf-8' }, 'not a legal drawing\n');
       return;
     }
-    // newDrawing takes BYTES; the wire form is hex. Feeding it the hex string
-    // would encode each character, not each byte, and store 6400 chars of
-    // nonsense - so the conversion is explicit here, at the boundary.
-    const e = newDrawing(body.name, pixelsFromHex(body.pixels));
-    // The creator's undo token, served ONCE, here and nowhere else: the guest
-    // page keeps it in that browser's storage and can take its own drawing
-    // back, and nobody who did not post it has it.
-    e.secret = randomBytes(10).toString('hex');
-    drawings.list.push(e);
-    saveDrawings();
+    // The store mints the creator's undo token and the seq the relay's cursor
+    // needs; the token is served ONCE, here and nowhere else.
+    const e = drawings.add(body.name, body.pixels, 'local');
     respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8' },
       JSON.stringify({ id: e.id, name: e.name, createdAt: e.createdAt, secret: e.secret }));
     return;
@@ -631,20 +539,16 @@ async function handleDrawings(req, res, url) {
       return;
     }
     const isOwner = isOwnerRequest(req);
-    const i = drawings.list.findIndex((d) => d.id === seg[2]);
-    if (i < 0) {
+    const e = drawings.byId(seg[2]);
+    if (e === null) {
       respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'no such drawing\n');
       return;
     }
-    if (!isOwner) {
-      const secret = drawings.list[i].secret;
-      if (typeof delHdr !== 'string' || typeof secret !== 'string' || !safeEqual(delHdr, secret)) {
-        respond(res, 403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'that token does not open this entry\n');
-        return;
-      }
+    if (!isOwner && !auth.opens(e)(req)) {
+      respond(res, 403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'that token does not open this entry\n');
+      return;
     }
-    drawings.list.splice(i, 1);
-    saveDrawings();
+    drawings.remove(e.id);
     respond(res, 204, {}, '');
     return;
   }
@@ -694,6 +598,24 @@ const server = createServer(async (req, res) => {
     handleContentGet(req, res);
     return;
   }
+  // GET /relay - what the wall is doing about the public relay, for the
+  // console. Read only: the pairing is a command-line flag, and an endpoint
+  // that could change the relay URL mid-party is a way to break the party.
+  if (url.pathname === '/relay') {
+    const st = relay === null ? null : relay.status;
+    respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+      JSON.stringify({
+        enabled: st !== null,
+        url: st?.url ?? '',
+        lastError: st?.lastError ?? null,
+        syncedAt: st?.syncedAt ?? 0,
+        sent: st?.sent ?? 0,
+        cursor: st?.cursor ?? 0,
+        count: drawings.size,
+      }));
+    return;
+  }
+
   if (url.pathname === '/drawings' || url.pathname.startsWith('/drawings/')) {
     if (req.method === 'GET') {
       await handleDrawings(req, res, url);
@@ -800,6 +722,13 @@ server.listen(port, HOST, () => {
   // data/owner-token.txt, so it survives the console scrolling away.
   console.log(`serve: owner token (draw.html -> "owner token"): ${owner.token}`
     + (owner.file === null ? '' : `  [saved to ${owner.file}]`));
+  if (relay === null) {
+    console.log('serve: relay off (guests reach this wall only over the local network)');
+  } else {
+    console.log(`serve: relay ${relayCfg.url} - the wall visits it every ${relayCfg.intervalMs / 1000} s`
+      + (relayCfg.key === '' ? '  [NO KEY: the relay will refuse, set --relay-key]' : ''));
+  }
+  if (relay !== null) relay.start();
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

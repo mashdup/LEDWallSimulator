@@ -367,6 +367,38 @@ function saveMine(list) {
 let mine = loadMine();
 let shownId = null;
 
+/**
+ * This browser's device token.
+ *
+ * Behind the public relay, every phone in the room arrives from one proxy
+ * address, so a per-address limit is one global limit: the first drawing at the
+ * party locks everybody out. The device token is the per-person key the relay
+ * gates on instead.
+ *
+ * It is deliberately weak, and that is the point: it is a random string in
+ * localStorage, gone with the browser, rotated by anyone who opens devtools. It
+ * is NOT a credential and grants nothing. It is the difference between "one
+ * guest, one drawing at a time" and "one guest, for everyone". The address gate
+ * stays underneath it, coarser, for the flood from a single phone.
+ */
+const DEVICE_KEY = 'ledwall-public-device';
+function deviceId() {
+  try {
+    const have = localStorage.getItem(DEVICE_KEY);
+    if (typeof have === 'string' && /^[a-z0-9-]{8,40}$/i.test(have)) return have;
+    const fresh = `${crypto.randomUUID()}`.replace(/[^a-z0-9-]/gi, '').slice(0, 40);
+    localStorage.setItem(DEVICE_KEY, fresh);
+    return fresh;
+  } catch {
+    // Private mode, storage disabled: a per-session id. Weaker, and honest -
+    // the guest gets the limit reset by reloading, which is what a stranger in
+    // private mode can do to any per-device gate.
+    return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+const DEVICE = deviceId();
+const deviceHeaders = (extra = {}) => ({ 'x-wall-device': DEVICE, ...extra });
+
 /** Turn a refusal into a sentence a guest can act on. */
 function why(status, text) {
   if (status === 429) return text || 'one at a time';
@@ -382,7 +414,7 @@ $('save').addEventListener('click', async () => {
   try {
     const r = await fetch('/drawings', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: deviceHeaders({ 'content-type': 'application/json' }),
       body: JSON.stringify({ name: $('name').value, pixels: pixelsToHex(editor.pixels) }),
     });
     if (!r.ok) {
@@ -417,7 +449,7 @@ $('takeback').addEventListener('click', async () => {
   if (entry === undefined) return;
   try {
     const r = await fetch(`/drawings/${entry.id}`, {
-      method: 'DELETE', headers: { 'x-wall-delete': entry.secret },
+      method: 'DELETE', headers: deviceHeaders({ 'x-wall-delete': entry.secret }),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     mine = mine.filter((m) => m.id !== entry.id);

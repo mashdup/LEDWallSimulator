@@ -866,6 +866,40 @@ async function pollContent() {
 setInterval(pollContent, 100);
 pollContent();
 
+/**
+ * The relay, in the console: one line, read from the wall's own server.
+ *
+ * The wall dials out, so the console cannot know the relay's state on its own,
+ * and the owner needs to see it at a party: "synced" is the queue moving, "not
+ * syncing" is the phones posting into a relay the laptop cannot reach while the
+ * wall keeps showing what it already has. The wording distinguishes the two
+ * failures that matter - no signal, and a key the relay does not recognise.
+ */
+function renderRelay(j) {
+  const el = $('relayOut');
+  if (el === null) return;
+  if (!j.enabled) {
+    setOutput(el, 'relay: off (guests reach this wall over the local network only)', 'warn');
+    return;
+  }
+  const host = (() => { try { return new URL(j.url).host; } catch { return j.url; } })();
+  if (j.lastError !== null) {
+    setOutput(el, `relay: ${host} - ${j.lastError}`, 'err');
+    return;
+  }
+  const ago = j.syncedAt > 0 ? Math.max(0, Math.round((Date.now() - j.syncedAt) / 1000)) : -1;
+  setOutput(el, `relay: ${host} - synced${ago >= 0 ? ` ${ago} s ago` : ''} · ${j.count} drawings`, 'ok');
+}
+
+async function pollRelay() {
+  try {
+    const r = await fetch('/relay', { cache: 'no-store' });
+    if (r.ok) renderRelay(await r.json());
+  } catch { /* the wall's own server is the thing that just went away */ }
+}
+setInterval(pollRelay, 5_000);
+pollRelay();
+
 function pushContentFrame() {
   if (page.endpoint !== '/content/frame' || cPushing) return;
   cPushing = true;

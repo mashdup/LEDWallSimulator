@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 import { findChrome } from '../tools/capture.js';
-import { freePort, startServe, openBrowser, waitForValue as waitFor, dropProfile } from './harness.js';
+import { freePort, startServe, openBrowser, waitForValue as waitFor, until, dropProfile } from './harness.js';
 
 /**
  * Content sync through the server - the only topology that reaches every
@@ -180,9 +180,18 @@ test('two real browser tabs agree on the content after one POST', async () => {
       const d = await cdp.eval(session, 'document.getElementById("wall")?.toDataURL() ?? ""');
       return d.includes('base64,') ? d : null;
     };
-    const a = await waitFor(canvasIs(tabA));
-    const b = await waitFor(canvasIs(tabB));
-    assert.equal(a, b, 'two instances must render the identical frame');
+    // Poll the PAIR until the two canvases match, instead of reading each once.
+    // The status line is the ack, and the canvas repaints on the frame loop,
+    // so a single read can catch one tab one frame behind the other: the
+    // previous state (a scrolling text) is still on its canvas. That is a
+    // sampling race in the test, not a sync failure on the wall - and the
+    // property being asserted is agreement, so let the loop prove agreement.
+    const a = await waitFor(until(async () => {
+      const x = await canvasIs(tabA)();
+      const y = await canvasIs(tabB)();
+      return x !== null && y !== null && x === y ? x : null;
+    }, 'the two canvases to agree'), 15_000);
+    assert.ok(a.includes('base64,'), 'both tabs produced a canvas');
 
     // An animation name must reach both tabs too (status is the ack; the
     // frames themselves are pure functions of the shared server clock).

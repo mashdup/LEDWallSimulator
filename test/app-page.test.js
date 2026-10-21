@@ -314,6 +314,15 @@ test('the console carries the gallery cadence, and mirrors the server that set i
       return /2 drawings/.test(t2) ? t2 : null;
     }, 10_000);
     assert.match(counted, /2 drawings/);
+
+    // The relay line: the console is at a party, and the owner's one question
+    // is "are the phones getting through?". This wall was started with no
+    // --relay, so the honest answer is a sentence, not a spinner.
+    const relayLine = await waitForValue(async () => {
+      const t = await cdp.eval(tab2, 'document.getElementById("relayOut").textContent').catch(() => '');
+      return /relay:/.test(t) ? t : null;
+    }, 10_000);
+    assert.match(relayLine, /relay: off/, 'the console says what the wall is doing about the public relay');
   } finally {
     if (proc !== null) proc.kill();
     await serve.stop();

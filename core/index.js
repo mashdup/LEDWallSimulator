@@ -58,6 +58,12 @@ export {
   newDrawing,
   validateEntry,
 } from './drawings.js';
+// The store and the guards are the two servers' shared machinery. Exported
+// here for symmetry with the rest of core/, and DOM-free like the rest of it:
+// a browser page must not import them, and the guest page's test is what keeps
+// that true.
+export { DrawingStore } from './drawing-store.js';
+export { clientAddr, deviceKey, makeAuth, makeRateGate, resolveToken, safeEqual } from './guards.js';
 export {
   CALIBRATION_PATTERNS,
   CALIBRATION_TIMING,

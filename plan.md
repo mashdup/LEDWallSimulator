@@ -360,3 +360,150 @@ value with no polling loop behind it.
 throws on timeout; `waitForValue` is an alias, so both names are one contract.
 Every existing suite passes unchanged — which is the point: the fix did not make
 the tests true, it made the readiness checks real.
+
+## 8. The public relay (`relay/`)
+
+A party's phones are not on the wall's network, and the wall is a laptop behind
+NAT whose server is loopback-bound on purpose (Web Serial needs a secure
+context; `http://192.168.x.x` is not one). So the wall cannot be reached, and
+should not be: the console, the serial panel and the frame driver stay off the
+network.
+
+The relay is the public door — a container on jarvis, behind Caddy at
+`https://wall.hoa.family`. Guests post to it; the wall **dials out** to it.
+
+```
+phone ──HTTPS──> Caddy ──> relay (Docker, loopback:8091) ──> /data
+                              ^
+                              |  GET /pull?since=N   POST /push
+wall laptop (loopback:8080, serial to the panel, gallery on screen)
+```
+
+### 8.1 A queue, not a proxy
+
+The wall is the thing that must not fail at 22:00. A proxy puts it on the
+critical path of a guest's save: laptop asleep, rebooting, or off the hotspot,
+and the phone shows an error and the drawing is gone. A queue takes the wall off
+that path — the guest gets a 200 from a machine that is always up, and the wall
+shows the drawings the moment it is back.
+
+Two-way, so the owner's family pictures on the wall reach the phones too, and a
+delete on either side is final on both.
+
+### 8.2 One number does the whole sync
+
+`core/drawing-store.js` gives every mutation a `seq`, and every delete a
+tombstone `{id, seq}`. `since(cursor)` is the whole sync story in one call:
+everything that happened after the number you last saw.
+
+The wall keeps two cursors in the store's state file — `sent` (how far the relay
+has been told about this wall) and `cursor` (how far this wall has been told
+about the relay) — so a reboot mid-party resumes where it left off. No diffing,
+no timestamps, no "last modified", and no way for a deleted drawing to come back
+from the dead: tombstones live on the same number line.
+
+Two rules keep the loop honest:
+
+- **An adopted entry is marked `origin: 'relay'` and never rides the push.**
+  Without that, one wall replays its whole gallery on every connect, and two
+  walls copy each other forever.
+- **A peer's delete is applied with `drop()`, not `remove()`.** `remove` is a
+  local decision, so it records a tombstone for peers to follow; `drop` is a
+  delete that is already out there, and re-recording it sends the same delete
+  back — a wall that keeps asking the relay to remove what the relay just told
+  it to remove.
+
+Secrets never cross the wire: `adopt()` strips the per-entry delete secret, so
+the wall's guests keep the takeback token the relay minted for them, and the
+wall never learns anyone's.
+
+### 8.3 Offline is a state, not an error
+
+The wall's client (`tools/relay-client.js`) backs off to 60 s, says the failure
+**once**, and keeps the local gallery running the whole time. A 401 is reported
+as "the relay refused the wall key", not as "not reachable" — the first sends
+the owner to the command line, the second sends them to the router.
+
+The bug this suite caught: the client re-armed its timer from `start()` and from
+the failure path, but not after a success. It synced once and then sat there for
+the rest of the party — the wall showed the drawings that arrived first and never
+saw a delete, a late posting, or anything it had saved itself. **A loop that only
+re-arms when it fails is a loop that stops working the moment it works.** Every
+tick arms the next one, success included.
+
+### 8.4 Three gates, and the proxy breaks the obvious one
+
+Behind Caddy, `clientAddr(req)` is the same loopback address for every guest in
+the room. A per-address limit is then one global limit: the first drawing locks
+the party out. So the relay splits the job:
+
+| gate | key | default | stops |
+|---|---|---|---|
+| politeness | `x-wall-device` (random id in localStorage) | 10 s, burst 6/min | one guest hammering save |
+| flood | real IP (XFF, only with `--trusted-proxy`) | burst 40/min, **no spacing** | a script, not a room of guests |
+| `rate_limit` (Caddy) | real IP | operator's | the internet at large |
+
+The address gate is deliberately loose: a room of twenty phones is one address,
+so any spacing limit there is a limit on the room. The device token is weak on
+purpose — a random string in `localStorage`, gone with the browser, rotated by
+anyone who opens devtools. It is not a credential and grants nothing. It is the
+difference between a per-guest limit and a global one, and the flood gate stays
+underneath it. `X-Forwarded-For` is believed only when `--trusted-proxy` says a
+proxy is in front: on the wall's own loopback server, the socket stays the
+identity, because there a forged header is the only kind a client sends.
+
+### 8.5 The surface, and the store that is now one thing
+
+The relay's entire public surface is a table: the guest page, the two modules it
+imports, `POST /drawings`, `DELETE /drawings/<id>`, `/healthz`, and the two sync
+verbs behind the wall key. `/index.html` — the wall's console — is not in the
+table, and neither is `GET /drawings`: a stranger cannot enumerate the gallery
+and cannot see the wall.
+
+The guest page's boundary is asserted as what it is: the **module graph**. The
+test collects the page's `from '...'` specifiers and requires the set to be
+exactly `../core/drawings.js` and `./draw-editor.js`, and requires no
+`new WebSocket`. (An earlier version of that test grepped the page for the
+string `content-protocol` — and failed on the page's own header comment, which
+explains in prose that it imports no content-protocol.js. Prose is not code.)
+
+`core/drawing-store.js` and `core/guards.js` are now the single implementation
+behind both servers: the wall's `/drawings` API and the relay's queue share the
+store, the rate gate, the token resolver and the auth. The wall's suite
+(`test/drawings-api.test.js`) is the proof the refactor kept the behaviour, not
+just the shape.
+
+Two bugs the refactor exposed, both worth naming:
+
+- **`resolveToken` called `require()` inside an ES module.** It threw, the
+  surrounding `catch` swallowed it, the token was never written to disk, and the
+  startup banner cheerfully printed the path it had "saved" it to. A `catch`
+  around a bug turns a broken feature into a silent one.
+- **The harness grepped the newest stdout chunk, not the accumulated log.** A
+  suite that reads the generated owner token out of the banner saw nothing,
+  because the token line arrived in an earlier chunk.
+
+### 8.6 The console shows the relay, and does not touch it
+
+The console has one read-only line: `relay: wall.hoa.family - synced 3 s ago �
+14 drawings`, `relay: wall.hoa.family - the relay refused the wall key (HTTP
+401)`, or `relay: off`. It reads `GET /relay` from the wall's own server, which
+answers from the client's state.
+
+Read-only on purpose. The pairing is a command-line flag, and a field that
+could repoint the wall at another relay mid-party is a way to break the party
+with a stray click. The console's job at a party is to tell the owner that the
+queue is moving � not to be a second place to configure the same thing.
+
+### 8.7 The card, and the QR that is not in this repo
+
+`web/card.html` is a print-friendly sign: the address in a black box, in type a
+person can read across a room, and a dashed square for a taped-on QR. It reads
+`location.host` for the address, so printing it from the relay makes the paper
+agree with the server. It fetches nothing, and the relay's test asserts that.
+
+The QR code itself is deliberately **not** implemented here. A QR encoder is
+~300 lines of GF(256) Reed-Solomon, format-info placement and mask penalties,
+and the failure mode is a matrix that looks right and does not scan � which is
+a party that cannot start, and no test in this suite can scan one. Any generator
+on the internet makes a correct QR for a 25-character URL in five seconds.
