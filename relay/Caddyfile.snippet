@@ -2,14 +2,16 @@
 #
 # Append this site block to /opt/homebrew/etc/Caddyfile, then:
 #   caddy validate --config /opt/homebrew/etc/Caddyfile --adapter caddyfile
-#   caddy reload  --config /opt/homebrew/etc/Caddyfile --adapter caddyfile
+#   caddy reload   --config /opt/homebrew/etc/Caddyfile --adapter caddyfile
 #
 # Validate BEFORE reloading: this Caddyfile serves every site on the box, and a
 # config that fails to load takes all of them down with it.
 #
 # wall.hoa.family already resolves to this box (CNAME -> mashdup.ipv64.net) and
-# the *.hoa.family certificate is already issued by the Porkbun DNS-01 global
-# options at the top of the file, so this block needs no TLS setup of its own.
+# the *.hoa.family certificate is issued by the Porkbun DNS-01 global options at
+# the top of the file, so this block needs no TLS setup of its own. The first
+# request for a new name triggers the DNS-01 issuance; it takes a few seconds
+# and needs the Porkbun credentials the launchd job already provides.
 #
 # The relay container binds 127.0.0.1:8091 on this host. Caddy owns :443 and
 # terminates TLS; the relay never sees a certificate and never answers the
@@ -41,13 +43,20 @@ wall.hoa.family {
 
 	encode zstd gzip
 
-	# NOT enabled: Caddy's per-IP rate_limit directive is experimental in
-	# v2.11, and `caddy run` on this box has no --experimental flag - adding it
-	# here makes the whole Caddyfile fail to load, which takes every site on
-	# this machine down with it. The relay's own gates cover the job:
+	# NO rate_limit here, and this is the one thing in the file that is easy to
+	# get wrong: Caddy's rate_limit directive is experimental, and experimental
+	# features are not registered in a Caddy that was not started with
+	# --experimental. This box runs plain `caddy run` (a LaunchDaemon, shared by
+	# every site on the machine), so adding the block makes the whole Caddyfile
+	# fail to load - and the reload that follows takes every site down.
+	#
+	# The job is covered without it:
 	#   - per device: 10 s spacing, burst 6/min  (one guest, one drawing)
 	#   - per network: burst 40/min, no spacing  (a flood, not a room of guests)
-	# If the edge limit is ever wanted, enable it with the flag and this shape:
+	#   - request_body above, and the relay's own 8 KB body limit
+	#
+	# If an edge limit is ever wanted, it needs --experimental on the daemon,
+	# and then this shape:
 	#
 	# rate_limit {
 	#   zone wall_post {

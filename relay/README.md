@@ -62,11 +62,13 @@ pairing. The owner token lives beside it and prunes the relay's gallery.
 `caddy reload`. The relay binds loopback only, like every other service here:
 Caddy owns 443 and terminates TLS.
 
-Caddy's `rate_limit` directive is **not** enabled: it is experimental in v2.11
-and `caddy run` on this box has no `--experimental` flag, so adding the block
-makes the whole Caddyfile fail to load — and that Caddyfile serves every site
-on the machine. The relay's two gates cover the job, and the shape of the edge
-limit is written (commented) in the snippet for whoever enables the flag.
+Caddy's `rate_limit` directive is **not** enabled, and not because of a version
+number: experimental features are not registered in a Caddy that was not
+started with `--experimental`, and `caddy run --help` does not even list that
+flag. Adding the block makes the whole Caddyfile fail to load, and the reload
+takes down every site on the machine. The relay's two gates cover the job, and
+the shape of the edge limit is written (commented) in the snippet for whoever
+enables the flag.
 
 Validate before reloading, always:
 
@@ -144,6 +146,19 @@ and it is on the relay's file list because that is where the address is true.
 The QR itself is yours to generate (any generator, the URL is 25 characters).
 A QR encoder is not worth shipping inside the wall: a subtly wrong matrix is a
 party that cannot start, and nothing in this repo's test suite can scan one.
+
+## Deployed on jarvis
+
+`~/ledwall-relay/repo` (git clone), container `ledwall-relay`, host
+`127.0.0.1:8091`, data in `relay/data/`. Deploy:
+
+```bash
+cd ~/ledwall-relay/repo && git pull && cd relay && docker compose up -d --build
+docker logs ledwall-relay          # the wall key, printed once at first boot
+```
+
+Rollback: `docker compose down`, and delete the site block from the Caddyfile
+(a dated `Caddyfile.bak-ledwall-*` sits beside it).
 
 ## Tests
 
