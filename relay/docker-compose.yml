@@ -32,6 +32,12 @@ services:
       # store at /app/data/relay-drawings.json persists nothing.
       - ./data:/data
     environment:
+      # INSIDE the container the server binds 0.0.0.0: Docker's -p forwards to
+      # the container's eth0, and a server bound to loopback in there is
+      # unreachable from the host - the mapping answers with an empty reply.
+      # The loopback discipline this box lives by is the HOST side of the
+      # mapping above (127.0.0.1:8091), which is what the internet sees.
+      - RELAY_HOST=0.0.0.0
       - RELAY_DATA=/data/drawings.json
       # Caddy is a real proxy, so X-Forwarded-For is the real client IP and the
       # relay may believe it. Without this flag every guest behind one NAT would
