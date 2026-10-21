@@ -1135,6 +1135,74 @@ serialPreflight();
 window.addEventListener('resize', () => sim.resize());
 
 // ---------------------------------------------------------------------------
+// Self-healing watchdog
+// ---------------------------------------------------------------------------
+
+/**
+ * What blanks the console is the browser, not this page.
+ *
+ * Measured: the page leaks nothing (JS heap, DOM nodes and server RSS all
+ * flat for minutes in every mode), and nothing here navigates or clears the
+ * DOM. What DOES blank a tab on a schedule is the tab lifecycle the browser
+ * owns: Edge's Sleeping Tabs (five minutes by default), Chrome's Memory
+ * Saver and Power Saver freeze or discard a background tab, and the tab
+ * comes back a blank page that needs a manual refresh. The audio keep-alive
+ * exempts a tab Chrome has heard a click in; a tab nobody clicked, and any
+ * policy with no audio exemption, is unprotected — and no page can stop a
+ * discard once the browser has decided.
+ *
+ * So the page heals itself instead. The frame clock stamps a heartbeat into
+ * localStorage once a second; when the tab becomes visible again, a stale
+ * heartbeat means the page was frozen — its timers, worker and streams died
+ * with it — and the page reloads. Everything the wall shows lives on the
+ * server, so a reload is cheap and loses nothing the wall is displaying.
+ *
+ * The reload is rate-limited: a page that reload-storms is a page whose
+ * server is down, and hammering a dead server is worse than a stale console.
+ */
+const HEARTBEAT_KEY = 'wall-heartbeat';
+const RELOAD_KEY = 'wall-heartbeat-reload';
+const HEARTBEAT_WRITE_MS = 1000;
+/** A wake-up older than this was frozen: the streams cannot have survived. */
+const STALE_RESUME_MS = 10_000;
+const RELOAD_COOLDOWN_MS = 60_000;
+
+function stampHeartbeat() {
+  try {
+    localStorage.setItem(HEARTBEAT_KEY, String(Date.now()));
+  } catch {
+    // Private mode / storage disabled: the watchdog silently self-cancels.
+  }
+}
+
+// A fresh load is alive: stamp BEFORE any resume check can read the store, so
+// the first pageshow of a healthy boot never reloads.
+stampHeartbeat();
+let lastBeatMs = Date.now();
+
+function resumeCheck() {
+  if (document.visibilityState !== 'visible') return;
+  let beatMs = 0;
+  let reloadMs = 0;
+  try {
+    beatMs = Number(localStorage.getItem(HEARTBEAT_KEY) ?? 0);
+    reloadMs = Number(sessionStorage.getItem(RELOAD_KEY) ?? 0);
+  } catch {
+    return;
+  }
+  if (Date.now() - beatMs <= STALE_RESUME_MS) return;
+  if (Date.now() - reloadMs < RELOAD_COOLDOWN_MS) return;
+  try {
+    sessionStorage.setItem(RELOAD_KEY, String(Date.now()));
+  } catch {
+    // Best effort: without storage the cooldown is gone, and one reload stands.
+  }
+  location.reload();
+}
+document.addEventListener('visibilitychange', resumeCheck);
+addEventListener('pageshow', resumeCheck);
+
+// ---------------------------------------------------------------------------
 // Go
 // ---------------------------------------------------------------------------
 
@@ -1170,6 +1238,13 @@ const clock = createClock(FRAME_MS);
 clock.onTick = () => {
   const now = performance.now();
   if (now - next >= -1) {
+    // The watchdog's pulse: one localStorage stamp a second, off the clock
+    // that drives the wall — if this tick runs, the page is alive.
+    const wallNow = Date.now();
+    if (wallNow - lastBeatMs >= HEARTBEAT_WRITE_MS) {
+      lastBeatMs = wallNow;
+      stampHeartbeat();
+    }
     // Never let the schedule drift behind the clock: a throttled or suspended
     // tab resumes at the current frame instead of replaying a backlog.
     next = Math.max(next + FRAME_MS, now - FRAME_MS);

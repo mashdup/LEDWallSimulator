@@ -330,3 +330,70 @@ test('the console carries the gallery cadence, and mirrors the server that set i
     dropProfile(profile);
   }
 });
+
+test('a console frozen by the browser reloads itself when it wakes', async (t) => {
+  const chrome = findChrome();
+  if (chrome === null) { t.skip('no browser on this machine'); return; }
+
+  const dir = mkdtempSync(join(tmpdir(), 'omp-watchdog-'));
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'd.json'), ...noGuards()]);
+  const dbgPort = await freePort();
+  const profile = mkdtempSync(join(tmpdir(), 'omp-watchdog-profile-'));
+  let proc = null;
+
+  try {
+    const browser = await openBrowser(chrome, dbgPort, profile);
+    proc = browser.proc;
+    const cdp = browser.cdp;
+    const tab = await cdp.openTab(`${serve.base}/index.html`);
+
+    // The heartbeat is real: the frame clock stamps it, so a running page
+    // has a fresh one.
+    await waitFor(async () => cdp.eval(tab, `(() =>
+      Number(localStorage.getItem('wall-heartbeat')) > 0 ? 'beating' : null
+    )()`).catch(() => null), 15_000);
+
+    // Simulate the browser's freeze: the page is stale by a minute, and the
+    // tab wakes up. The marker rides in sessionStorage, which survives the
+    // reload, so what we read afterwards is proof of what happened.
+    await cdp.eval(tab, `(() => {
+      sessionStorage.setItem('watchdog-marker', 'armed');
+      localStorage.setItem('wall-heartbeat', String(Date.now() - 60_000));
+      sessionStorage.removeItem('wall-heartbeat-reload');
+      document.dispatchEvent(new Event('visibilitychange'));
+      return 'fired';
+    })()`);
+
+    // After the reload the app boots again: the marker is still there (same
+    // tab), the frame readout is live, and the heartbeat is fresh — a page
+    // that never reloaded would have no fresh heartbeat, and the marker
+    // proves the fresh readout came from the watchdog's reload, not from
+    // the original load.
+    const back = await waitFor(async () => cdp.eval(tab, `(() => {
+      const beat = Number(localStorage.getItem('wall-heartbeat') ?? 0);
+      const fresh = Date.now() - beat < 10_000;
+      const fps = (document.getElementById('frameOut')?.textContent ?? '');
+      return sessionStorage.getItem('watchdog-marker') === 'armed' && fresh && /fps/.test(fps)
+        ? 'recovered' : null;
+    })()`).catch(() => null), 20_000);
+    assert.equal(back, 'recovered', 'a woken console must reload itself, not sit blank until a human refreshes');
+
+    // The storm guard: a stale wake-up inside the cooldown must NOT reload
+    // again. The guard value is the proof — a reload re-stamps it, a page
+    // that correctly stays put does not.
+    const guard = await cdp.eval(tab, `(() => {
+      localStorage.setItem('wall-heartbeat', String(Date.now() - 60_000));
+      sessionStorage.setItem('wall-heartbeat-reload', String(Date.now()));
+      document.dispatchEvent(new Event('visibilitychange'));
+      return sessionStorage.getItem('wall-heartbeat-reload');
+    })()`);
+    await new Promise((r) => setTimeout(r, 2000));
+    const after = await cdp.eval(tab, `sessionStorage.getItem('wall-heartbeat-reload')`);
+    assert.equal(after, guard, 'the reload is rate-limited: a stale wake-up inside the cooldown stays put');
+  } finally {
+    if (proc !== null) proc.kill();
+    await serve.stop();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 12, retryDelay: 150 });
+    dropProfile(profile);
+  }
+});
