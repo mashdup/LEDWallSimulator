@@ -398,6 +398,20 @@ test('pulling the cable while idle clears `connected` immediately', async () => 
     assert.equal(sink.port, null);
     assert.equal(sink.lastError, 'The serial device disconnected.');
     assert.equal(sink.send(sampleFrame()), false);
+
+    // A disconnected port is not a closed port. The browser keeps the port —
+    // and its OS handle in the browser process's serial service — open until
+    // the page closes it. A wall whose USB re-enumerates (power sag on a
+    // bright frame) then leaks one port per cycle for the whole show, and the
+    // process that dies first is the one holding them: the plain-grey-page
+    // failure. So the disconnect handler must close the port it forgets.
+    await settle();
+    await settle();
+    assert.equal(port.closed, true, 'the disconnect handler must close the port');
+    assert.equal(
+      port.listenerCount('disconnect'), 0,
+      'and remove its listener: a closed port must not keep the sink alive',
+    );
   } finally {
     await sink.close();
   }

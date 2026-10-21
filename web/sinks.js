@@ -385,9 +385,26 @@ class SerialPortSink extends FrameSink {
 
   #onDisconnect = () => {
     if (this.port === null) return;
+    const port = this.port;
+    const writer = this.writer;
     this.writer = null;
     this.port = null;
     this.lastError = 'The serial device disconnected.';
+    // A disconnected port is NOT a closed port. The browser keeps it — and
+    // its OS handle in the serial service, which lives in the BROWSER
+    // process — open until the page calls close(). This wall draws amps, a
+    // bright frame can sag USB, and the ESP32's port re-enumerates: every
+    // cycle used to leak one port forever, because close() reads this.port
+    // and this handler had just nulled it. Hours of a show is hundreds of
+    // leaked handles in the process that paints the page — which is the
+    // plain-grey-screen-with-no-Aw-Snap symptom this now fixes. Release the
+    // writer lock and close the port the device left behind.
+    try {
+      writer?.releaseLock();
+    } catch {
+      // The disconnect already killed the stream; there is no lock to let go.
+    }
+    closePort(port, this.#onDisconnect).catch(() => {});
   };
 }
 
