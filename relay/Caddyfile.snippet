@@ -1,52 +1,62 @@
 # Caddy: the public door for the LED wall relay.
 #
-# Append this site block to /opt/homebrew/etc/Caddyfile (as root), then:
-#   caddy validate --config /opt/homebrew/etc/Caddyfile
-#   caddy reload  --config /opt/homebrew/etc/Caddyfile
+# Append this site block to /opt/homebrew/etc/Caddyfile, then:
+#   caddy validate --config /opt/homebrew/etc/Caddyfile --adapter caddyfile
+#   caddy reload  --config /opt/homebrew/etc/Caddyfile --adapter caddyfile
+#
+# Validate BEFORE reloading: this Caddyfile serves every site on the box, and a
+# config that fails to load takes all of them down with it.
 #
 # wall.hoa.family already resolves to this box (CNAME -> mashdup.ipv64.net) and
-# the *.hoa.family certificate is already issued via the Porkbun DNS-01 global
-# options, so this block needs no TLS setup of its own.
+# the *.hoa.family certificate is already issued by the Porkbun DNS-01 global
+# options at the top of the file, so this block needs no TLS setup of its own.
 #
-# The relay container binds 127.0.0.1:8091. Caddy owns :443 and terminates TLS;
-# the relay never sees a certificate, and never answers the internet directly.
+# The relay container binds 127.0.0.1:8091 on this host. Caddy owns :443 and
+# terminates TLS; the relay never sees a certificate and never answers the
+# internet directly.
 
 wall.hoa.family {
-	# The guest page is a QR code on a card, opened by strangers. Everything
-	# they send arrives through here, so the edge is where the per-IP limit
-	# lives: the relay behind this proxy sees one client address (this one),
-	# and its own gates are keyed on the page's device token and on the real IP
-	# that `trusted_proxies` forwards below.
-	rate_limit {
-		zone wall_post {
-			match {
-				method POST
-			}
-			# One drawing per minute per visitor, and a room of guests behind
-			# one NAT is not one visitor: this is keyed on the real IP.
-			group ip
-			window 1m
-			limit 20
-			key 429
-			retry_after 30s
-		}
-	}
-
-	# Say "believe the X-Forwarded-For that Caddy sets", and name the proxy:
-	# here, Caddy itself, on this box. The relay runs `--trusted-proxy` /
-	# RELAY_TRUSTED_PROXY=1 to match. Without both halves, the relay's flood
-	# gate counts this loopback address for every guest in the room.
-	reverse_proxy 127.0.0.1:8091 {
-		header_up X-Real-IP {remote_host}
-	}
-
-	# A guest's phone must never run a stale page at a party.
+	# A guest's phone must never run a stale page at a party, and nothing here
+	# is a page worth caching: the drawing goes up or it does not.
 	header {
 		Cache-Control "no-store"
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Caddy sets X-Forwarded-For on its own; the relay believes it because it
+	# runs with --trusted-proxy / RELAY_TRUSTED_PROXY=1. Both halves are needed:
+	# without the flag the relay's flood gate counts this loopback address for
+	# every guest in the room, and with the flag set in front of a client that
+	# can forge the header, the limit is a suggestion.
+	reverse_proxy 127.0.0.1:8091
+
+	# A drawing is ~3.3 KB of hex. A larger body is not a drawing, and the body
+	# limit is the cheap first answer to a flood.
+	request_body {
+		max_size 64KB
 	}
 
 	encode zstd gzip
+
+	# NOT enabled: Caddy's per-IP rate_limit directive is experimental in
+	# v2.11, and `caddy run` on this box has no --experimental flag - adding it
+	# here makes the whole Caddyfile fail to load, which takes every site on
+	# this machine down with it. The relay's own gates cover the job:
+	#   - per device: 10 s spacing, burst 6/min  (one guest, one drawing)
+	#   - per network: burst 40/min, no spacing  (a flood, not a room of guests)
+	# If the edge limit is ever wanted, enable it with the flag and this shape:
+	#
+	# rate_limit {
+	#   zone wall_post {
+	#     match { method POST }
+	#     group ip
+	#     window 1m
+	#     limit 20
+	#     key 429
+	#     retry_after 30s
+	#   }
+	# }
 }

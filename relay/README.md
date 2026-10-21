@@ -62,9 +62,18 @@ pairing. The owner token lives beside it and prunes the relay's gallery.
 `caddy reload`. The relay binds loopback only, like every other service here:
 Caddy owns 443 and terminates TLS.
 
-Caddy's `rate_limit` is the edge gate per real IP; the relay's own gates are per
-device (politeness) and per network (flood). Three layers, and none of them is
-a JavaScript speed bump in a page that a stranger can open in devtools.
+Caddy's `rate_limit` directive is **not** enabled: it is experimental in v2.11
+and `caddy run` on this box has no `--experimental` flag, so adding the block
+makes the whole Caddyfile fail to load — and that Caddyfile serves every site
+on the machine. The relay's two gates cover the job, and the shape of the edge
+limit is written (commented) in the snippet for whoever enables the flag.
+
+Validate before reloading, always:
+
+```bash
+caddy validate --config /opt/homebrew/etc/Caddyfile --adapter caddyfile
+caddy reload   --config /opt/homebrew/etc/Caddyfile --adapter caddyfile
+```
 
 ## The gates, and what each one is for
 
@@ -118,7 +127,11 @@ node relay/server.js [--port 8080] [--host 127.0.0.1] [--data <file>]
 ```
 
 In a container, `RELAY_DATA`, `RELAY_TRUSTED_PROXY`, `RELAY_PORT`, `RELAY_HOST`
-do the same jobs.
+do the same jobs. `RELAY_HOST=0.0.0.0` is required inside the container:
+Docker's `-p` forwards to the container's eth0, and a server bound to loopback
+in there is unreachable — the mapped port answers with an empty reply. The
+loopback discipline on this box is the **host** side of the mapping
+(`127.0.0.1:8091`), which is the half the internet sees.
 
 ## The card on the table
 
