@@ -443,3 +443,69 @@ test('the grey page: paint stall recorded, canvas revived, page NOT reloaded', a
     dropProfile(profile);
   }
 });
+
+test('a granted serial port reopens at boot: the show joins itself, no click', async (t) => {
+  const chrome = findChrome();
+  if (chrome === null) { t.skip('no browser on this machine'); return; }
+
+  const dir = mkdtempSync(join(tmpdir(), 'omp-auto-'));
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'd.json'), ...noGuards()]);
+  const dbgPort = await freePort();
+  const profile = mkdtempSync(join(tmpdir(), 'omp-auto-profile-'));
+  let proc = null;
+
+  try {
+    const browser = await openBrowser(chrome, dbgPort, profile);
+    proc = browser.proc;
+    const cdp = browser.cdp;
+
+    // The wall device exists as a GRANTED port before the page ever loads:
+    // that is Electron's steady state (permission handler grants at install)
+    // and the browser's state after one human Connect. The page must open it
+    // and stream with zero interaction.
+    const fake = `(() => {
+      const port = {
+        opened: null,
+        getInfo: () => ({ path: 'COM9', usbProductName: 'ESP32 UART' }),
+        open: async (o) => { port.opened = o; },
+        setSignals: async () => {},
+        close: async () => {},
+        writable: { getWriter: () => ({ write: () => Promise.resolve(), releaseLock: () => {}, close: async () => {} }) },
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      };
+      window.__wallPort = port;
+      Object.defineProperty(navigator, 'serial', { value: {
+        getPorts: async () => [port],
+        requestPort: async () => port,
+        addEventListener: () => {},
+      }, configurable: true });
+    })()`;
+
+    const tab = await cdp.openTab('about:blank');
+    await cdp.send('Page.enable', {}, tab);
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: fake }, tab);
+    await cdp.send('Page.navigate', { url: `${serve.base}/index.html` }, tab);
+
+    // No clicks, no gestures: the console connects itself and names the port.
+    const connected = await waitFor(async () => {
+      const t2 = await cdp.eval(tab, 'document.getElementById("sinkOut").textContent').catch(() => '');
+      return /reopened the granted port/.test(t2) ? t2 : null;
+    }, 15_000);
+    assert.match(connected, /COM9/, 'the reopened port is named, the way Connect names it');
+
+    // It really opened the granted device at the wire baud, and the frame
+    // line says the serial sink is streaming.
+    const proof = await waitFor(async () => cdp.eval(tab, `(() => {
+      const opened = window.__wallPort.opened;
+      const fps = document.getElementById('frameOut')?.textContent ?? '';
+      return opened?.baudRate === 921600 && /sink serial/.test(fps) ? JSON.stringify(opened) : null;
+    })()`).catch(() => null), 15_000);
+    assert.match(proof, /921600/, 'the granted port opened at the wire baud - the wall streams from the first tick');
+  } finally {
+    if (proc !== null) proc.kill();
+    await serve.stop();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 12, retryDelay: 150 });
+    dropProfile(profile);
+  }
+});

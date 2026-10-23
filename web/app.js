@@ -1133,6 +1133,55 @@ async function serialPreflight() {
 }
 serialPreflight();
 
+// Auto-reconnect: a GRANTED serial port reopens with no gesture, so this
+// rejoins the show by itself after a crash-reload, an app restart, a machine
+// reboot — the wall's stream resumes with no human at the keyboard. (The
+// companion lives in sinks.js: a cable PULL re-arms on the device's own
+// 'connect' event, so a power-sag re-enumeration heals mid-show too.)
+// Silent when nothing was ever granted: the first show of the day always
+// starts with a human clicking Connect, which is the right amount of intent
+// — UNLESS the app shell is running, which answers window.wallAutoStart()
+// and manufactures the one thing the page cannot: a user gesture.
+(async () => {
+  const serial = globalThis.navigator?.serial;
+  if (serial?.getPorts === undefined) return;
+  const granted = await serial.getPorts().catch(() => []);
+  if (Array.isArray(granted) && granted.length > 0 && sink === null) {
+    await window.wallSerialConnect();
+    // Only rewrite the line when the reopen SUCCEEDED (connect() already
+    // named any failure); name the port the way Connect names it, so the
+    // owner can tell 'auto-healed onto COM8' from 'connected by hand'.
+    if (sink !== null) {
+      const info = sink.port?.getInfo?.();
+      setOutput(
+        $('sinkOut'),
+        `auto-reconnected: ${sink.kind}${info?.path ? ` - ${info.path}` : ''} - reopened the granted port, no click needed`,
+        'ok',
+      );
+    }
+  }
+})();
+
+// The app shell's two entry points (main.cjs drives them after every page
+// load): wallAutoStart reports what the page needs ('granted' = reconnected
+// itself; 'gesture' = the picker needs a click the shell will synthesize),
+// and wallSerialConnect performs the connect once that gesture exists.
+window.wallSerialConnect = () => {
+  $('sink').value = 'serial';
+  return connect();
+};
+window.wallAutoStart = async () => {
+  const serial = globalThis.navigator?.serial;
+  if (serial?.getPorts === undefined) return 'none';
+  if (sink !== null) return 'connected';
+  const granted = await serial.getPorts().catch(() => []);
+  if (Array.isArray(granted) && granted.length > 0) {
+    await window.wallSerialConnect();
+    return 'granted';
+  }
+  return 'gesture';
+};
+
 window.addEventListener('resize', () => sim.resize());
 
 // ---------------------------------------------------------------------------

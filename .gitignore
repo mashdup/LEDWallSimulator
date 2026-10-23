@@ -37,3 +37,6 @@ relay/data/
 
 # local credentials (SSH etc) - never commit
 .env
+
+# electron-builder output: rebuilt per version, never source
+dist/

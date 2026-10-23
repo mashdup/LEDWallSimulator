@@ -241,7 +241,6 @@ class SerialPortSink extends FrameSink {
     this.stats.bytes = 0;
     this.stats.errors = 0;
   }
-
   get connected() {
     return this.writer !== null;
   }
@@ -272,15 +271,29 @@ class SerialPortSink extends FrameSink {
       throw new Error(serialUnavailableMessage());
     }
 
-    let port;
+    let port = null;
+    // A port the user has granted before needs NO gesture to open; a fresh
+    // requestPort() does. Preferring the granted port is the difference
+    // between 'a reload darkens the wall' (a browser can only ask a human)
+    // and 'the wall heals itself' (Electron grants at install, so the
+    // reloaded page reopens COM8 on its own, and an ESP32 that
+    // re-enumerates mid-show streams again without a click).
     try {
-      port = await serial.requestPort();
-    } catch (err) {
-      throw new Error(
-        'No serial port was selected, so the wall cannot be driven over USB. ' +
-          'Pick the ESP32 COM/UART port in the browser prompt (or reconnect the cable).',
-        { cause: err },
-      );
+      const granted = await serial.getPorts();
+      if (Array.isArray(granted) && granted.length > 0) port = granted[granted.length - 1];
+    } catch {
+      // No getPorts on this engine: the picker decides, as before.
+    }
+    if (port === null) {
+      try {
+        port = await serial.requestPort();
+      } catch (err) {
+        throw new Error(
+          'No serial port was selected, so the wall cannot be driven over USB. ' +
+            'Pick the ESP32 COM/UART port in the browser prompt (or reconnect the cable).',
+          { cause: err },
+        );
+      }
     }
 
     try {
@@ -366,6 +379,9 @@ class SerialPortSink extends FrameSink {
     const writer = this.writer;
     this.port = null;
     this.writer = null;
+    // A close the app asked for is final: the reconnect watcher is armed only
+    // by a cable pull, and a deliberate Disconnect must not be undone.
+    this.reconnectArmed = false;
     // Leave the chip in RUN mode. The driver's close defaults deassert both
     // lines, and deasserted DTR holds IO0 LOW through the auto-reset
     // circuit - so the chip reboots into the BOOTLOADER on every app close,
@@ -405,7 +421,24 @@ class SerialPortSink extends FrameSink {
       // The disconnect already killed the stream; there is no lock to let go.
     }
     closePort(port, this.#onDisconnect).catch(() => {});
+    // Then arm for the cable's return: the ESP32 re-enumerates within
+    // seconds of a sag, the grant rides with the device, so getPorts()
+    // hands back a usable port and the stream resumes with no human and no
+    // gesture. One-shot per pull; a failed open re-arms for the next try.
+    this.#armReconnect();
   };
+
+  #armReconnect() {
+    const serial = globalThis.navigator?.serial;
+    if (serial === undefined || serial === null || typeof serial.addEventListener !== 'function') return;
+    this.reconnectArmed = true;
+    serial.addEventListener('connect', () => {
+      this.open().then(
+        () => { this.reconnectArmed = false; },
+        () => { if (this.reconnectArmed) this.#armReconnect(); },
+      );
+    }, { once: true });
+  }
 }
 
 /**

@@ -417,6 +417,76 @@ test('pulling the cable while idle clears `connected` immediately', async () => 
   }
 });
 
+test('open() prefers the GRANTED port: a restart reopens the wall with no gesture', async () => {
+  const granted = fakePort();
+  const fresh = fakePort();
+  let asked = 0;
+  const previous = globalThis.navigator;
+  Object.defineProperty(globalThis, 'navigator', {
+    value: {
+      serial: {
+        getPorts: async () => [granted],
+        requestPort: async () => { asked++; return fresh; },
+      },
+    },
+    configurable: true,
+    writable: true,
+  });
+  try {
+    const sink = new SerialSink();
+    await sink.open();
+    assert.equal(asked, 0, 'the picker must not be consulted when a port is already granted');
+    assert.equal(granted.opened?.baudRate, 921600, 'the GRANTED port is the one that opens');
+    await sink.close();
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { value: previous, configurable: true, writable: true });
+  }
+});
+
+test('the ESP32 re-enumerating mid-show: the sink reopens the port on its own', async () => {
+  const port = fakePort();
+  const serialEvents = new Map();
+  const previous = globalThis.navigator;
+  Object.defineProperty(globalThis, 'navigator', {
+    value: {
+      serial: {
+        requestPort: async () => port,
+        addEventListener: (type, fn) => {
+          if (!serialEvents.has(type)) serialEvents.set(type, new Set());
+          serialEvents.get(type).add(fn);
+        },
+      },
+    },
+    configurable: true,
+    writable: true,
+  });
+  try {
+    const sink = new SerialSink();
+    await sink.open();
+    assert.equal(sink.connected, true);
+
+    // The sag: the device drops. The port is closed, and the sink arms for
+    // the device's own 'connect' event.
+    port.emit('disconnect');
+    await settle();
+    await settle();
+    assert.equal(port.closed, true, 'the disconnect closes the port');
+    assert.ok((serialEvents.get('connect')?.size ?? 0) >= 1, 'the sink armed for the cable return');
+
+    // The return: seconds later the device re-enumerates. The watcher opens
+    // it; the stream is back with no human and no gesture (the reset pulse
+    // inside open() takes ~100 ms, so give the chain a beat).
+    port.closed = false;
+    for (const fn of serialEvents.get('connect') ?? []) fn({ type: 'connect' });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(sink.connected, true, 'the stream is back on its own');
+    assert.equal(sink.send(sampleFrame()), true, 'and frames flow again');
+    await sink.close();
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { value: previous, configurable: true, writable: true });
+  }
+});
+
 test('close() flushes queued frames, releases the port, and is idempotent', async () => {
   const port = fakePort();
   const sink = await connectedSink(port);

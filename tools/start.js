@@ -64,37 +64,64 @@ let shuttingDown = false;
 
 function usage() {
   console.error('usage: npm start [-- --port <port>] [--no-browser]');
-  console.error('       npm run wall  (standalone app window, show mode)');
+  console.error('       npm run wall  (the app: Electron shell, owns its own server)');
+  console.error('       npm run wall -- --relay <url> --relay-key <hex> --kiosk --debug');
   console.error('       node tools/start.js [--port 8090] [--no-browser] [--app]');
-  console.error('       npm run wall -- --debug  (app with DevTools on 127.0.0.1:9223)');
 }
 
-/** Same flag/env precedence as serve.js: --port > PORT > 8080. */
+/**
+ * Same flag/env precedence as serve.js: --port > PORT > 8080.
+ *
+ * Wall flags (--relay, --relay-key, --relay-interval, --kiosk, --port in
+ * electron mode) are FORWARDING arguments: they belong to the app shell
+ * (main.cjs), which forwards the relay ones to its own serve.js child. The
+ * shell owns the whole stack in electron mode, so dev and packaged run the
+ * identical shape - which is the point of the shell.
+ */
 function parseArgs(argv) {
   let flag = null;
   let browser = true;
   let app = false;
   let electron = false;
   let debug = false;
+  const extra = [];
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--port') {
-      flag = argv[i + 1];
-      i += 1;
-      if (flag === undefined) {
-        console.error('start: --port needs a value');
+    const forwardsValue = (name) => {
+      const v = argv[i + 1];
+      if (v === undefined) {
+        console.error(`start: ${name} needs a value`);
         usage();
         process.exit(2);
       }
+      extra.push(name, v);
+      i += 1;
+    };
+    if (arg === '--port') {
+      if (electron) forwardsValue('--port');
+      else {
+        flag = argv[i + 1];
+        i += 1;
+        if (flag === undefined) {
+          console.error('start: --port needs a value');
+          usage();
+          process.exit(2);
+        }
+      }
     } else if (arg.startsWith('--port=')) {
       flag = arg.slice('--port='.length);
+      if (electron) { extra.push('--port', flag); flag = null; }
     } else if (arg === '--no-browser') {
       browser = false;
     } else if (arg === '--app') {
       app = true;
     } else if (arg === '--electron') {
       electron = true;
+    } else if (arg === '--relay' || arg === '--relay-key' || arg === '--relay-interval') {
+      forwardsValue(arg);
+    } else if (arg === '--kiosk') {
+      extra.push('--kiosk');
     } else if (arg === '--debug') {
       // Opens Electron's DevTools protocol on 127.0.0.1:9223 so the app
       // page's state (fps, sink status, frame seq) can be read from
@@ -110,10 +137,16 @@ function parseArgs(argv) {
       process.exit(2);
     }
   }
+  if (extra.length > 0 && electron === false) {
+    console.error('start: --relay/--relay-key/--relay-interval/--kiosk are app (npm run wall) flags.');
+    console.error('       For the relay with the plain server, pass them to: npm run serve -- --relay ...');
+    usage();
+    process.exit(2);
+  }
 
   const explicit = flag !== null || process.env.PORT !== undefined;
   const raw = flag ?? process.env.PORT ?? null;
-  if (raw === null) return { port: null, explicit: false, browser, app, electron, debug };
+  if (raw === null) return { port: null, explicit: false, browser, app, electron, debug, extra };
 
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -128,7 +161,7 @@ function parseArgs(argv) {
     console.error('Pick any other port, e.g. 8080');
     process.exit(2);
   }
-  return { port, explicit, browser, app, electron, debug };
+  return { port, explicit, browser, app, electron, debug, extra };
 }
 
 /**
@@ -138,7 +171,7 @@ function parseArgs(argv) {
  * decision in main.cjs. Web Serial is granted and answered programmatically
  * there (COM8 preferred), so the show needs no click ritual for the picker.
  */
-function openElectronWindow(url, debug = false) {
+function openElectronWindow(extra, debug = false) {
   // The electron package exports the binary path from CJS; ask a CJS child.
   const probe = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("electron"))'], {
     encoding: 'utf8',
@@ -146,8 +179,7 @@ function openElectronWindow(url, debug = false) {
   });
   const bin = (probe.stdout ?? '').trim();
   if (probe.status !== 0 || !bin) {
-    console.log('start: electron is not installed (npm i -D electron). Falling back to the default browser.');
-    openInBrowser(url);
+    console.log('start: electron is not installed (npm i -D electron) - falling back to the Chrome app window.');
     return null;
   }
   const main = fileURLToPath(new URL('./electron/main.cjs', import.meta.url));
@@ -156,11 +188,14 @@ function openElectronWindow(url, debug = false) {
   // MainWindowHandle stays 0 - the app runs with no window on the desktop;
   // without it, 'LED Wall' appears). Electron is a GUI binary, so no console
   // window exists to hide in the first place.
-  const args = [main, url];
-  // '--debug' as an APP argument: main.cjs turns it into the
+  //
+  // No URL argument: the shell computes its own (it owns and boots its own
+  // serve.js child), so dev and the packaged binary run the identical shape.
+  const args = [main, ...extra];
+  // '--wall-debug' as an APP argument: main.cjs turns it into the
   // remote-debugging-port switch (post-path CLI args are app args, not
   // Chromium switches - passing the raw switch here does nothing).
-  if (debug) args.push('--debug');
+  if (debug) args.push('--wall-debug');
   const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   proc.unref();
   // The single-instance newcomer touches the shared cache dir before it
@@ -374,7 +409,7 @@ function openInBrowser(url) {
  * Run serve.js on one port, forwarding its output, and open the browser the
  * moment it reports a bound socket. Resolves with the exit outcome.
  */
-function serveOnce(port, openBrowser, appMode, electronMode, debug = false) {
+function serveOnce(port, openBrowser, appMode, debug = false) {
   return new Promise((done) => {
     const proc = spawn(process.execPath, [SERVE_SCRIPT, '--port', String(port)], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -391,8 +426,7 @@ function serveOnce(port, openBrowser, appMode, electronMode, debug = false) {
       const ready = READY.exec(log);
       if (ready === null) return;
       announced = true;
-      if (electronMode) appChild = openElectronWindow(ready[1], debug);
-      else if (appMode) appChild = openAppWindow(ready[1]);
+      if (appMode) appChild = openAppWindow(ready[1]);
       else if (openBrowser) openInBrowser(ready[1]);
       console.log(`start: ${ready[1]} — Ctrl+C to stop.`);
     };
@@ -423,13 +457,18 @@ function shutdown() {
   if (appChild !== null) {
     killStaleInstances();
     if (process.platform === 'win32') {
+      // The shell AND the serve.js child it spawned: both run on the app
+      // binary (dev: electron.exe; packaged: 'LED Wall.exe'), so match on
+      // the scripts in their command lines, not on the node.exe name.
       spawnSync('powershell.exe', ['-NoProfile', '-Command',
-        "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | " +
-        "Where-Object CommandLine -like '*electron*main.cjs*' | " +
+        "Get-CimInstance Win32_Process | " +
+        "Where-Object { ($_.Name -eq 'electron.exe' -or $_.Name -like 'LED Wall*') " +
+        "and ($_.CommandLine -like '*main.cjs*' -or $_.CommandLine -like '*serve.js*') } | " +
         'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }'],
         { stdio: 'ignore', windowsHide: true });
     } else {
       spawnSync('pkill', ['-f', 'electron.*main.cjs'], { stdio: 'ignore' });
+      spawnSync('pkill', ['-f', 'electron.*serve.js'], { stdio: 'ignore' });
     }
   }
   const proc = child;
@@ -453,7 +492,7 @@ for (const signal of process.platform === 'win32' ? ['SIGINT', 'SIGBREAK', 'SIGT
   process.once(signal, shutdown);
 }
 
-const { port, explicit, browser, app, electron, debug } = parseArgs(process.argv.slice(2));
+const { port, explicit, browser, app, electron, debug, extra } = parseArgs(process.argv.slice(2));
 
 // A zombie serve.js from a dead launcher holds the port AND splits the show
 // across two servers; the new launcher owns the script, so at startup every
@@ -461,24 +500,63 @@ const { port, explicit, browser, app, electron, debug } = parseArgs(process.argv
 killStaleServe();
 
 let attempt = port ?? DEFAULT_PORT;
-for (let tries = 0; ; tries++) {
-  const outcome = await serveOnce(attempt, browser, app, electron, debug);
-  if (outcome.code === 0 || shuttingDown) break;
-  // An explicit port is a request, not a preference. Only an unrequested 8080
-  // may move, and only once.
-  if (explicit || tries > 0 || !/already in use/.test(outcome.log)) {
-    process.exitCode = outcome.code;
-    break;
+
+if (electron === true) {
+  // THE APP: the shell owns the whole stack — it boots its own serve.js on
+  // its own port. Launching serve here would only compete for that port.
+  appChild = openElectronWindow(extra, debug);
+  if (appChild !== null) {
+    // A plain 'exit' listener proved unreliable for the GUI tree (the shell
+    // quits itself when its serve child dies, and the event never arrived -
+    // measured: launcher idles forever on a dead show). Poll liveness too:
+    // whichever signal arrives first ends the session.
+    const code = await new Promise((d) => {
+      let settled = false;
+      const done = (c) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(iv);
+        d(c);
+      };
+      const iv = setInterval(() => {
+        try {
+          process.kill(appChild.pid, 0);
+        } catch {
+          done(appChild.exitCode ?? 0);
+        }
+      }, 1000);
+      appChild.once('exit', (c) => done(c ?? 1));
+      appChild.once('error', () => done(1));
+      iv.unref();
+    });
+    if (shuttingDown === false) process.exitCode = code;
+  } else {
+    // No Electron on this machine: the show runs as a Chrome app window
+    // (the old --app shape) so a missing npm dependency never darkens a wall.
+    console.log('start: continuing in --app mode so the show runs anyway.');
   }
-  let fallback = null;
-  try {
-    fallback = await freePort();
-  } catch (err) {
-    // Only reachable on a machine whose whole dynamic range is blocked ports.
-    console.error(`start: ${err.message}`);
-    process.exitCode = 1;
-    break;
+}
+
+if (appChild === null) {
+  for (let tries = 0; ; tries++) {
+    const outcome = await serveOnce(attempt, browser, app, debug);
+    if (outcome.code === 0 || shuttingDown) break;
+    // An explicit port is a request, not a preference. Only an unrequested
+    // 8080 may move, and only once.
+    if (explicit || tries > 0 || !/already in use/.test(outcome.log)) {
+      process.exitCode = outcome.code;
+      break;
+    }
+    let fallback = null;
+    try {
+      fallback = await freePort();
+    } catch (err) {
+      // Only reachable on a machine whose whole dynamic range is blocked ports.
+      console.error(`start: ${err.message}`);
+      process.exitCode = 1;
+      break;
+    }
+    console.log(`start: port ${attempt} is already in use — using ${fallback} instead.`);
+    attempt = fallback;
   }
-  console.log(`start: port ${attempt} is already in use — using ${fallback} instead.`);
-  attempt = fallback;
 }
