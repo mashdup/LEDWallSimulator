@@ -500,7 +500,8 @@ function report(k, ma) {
   setOutput(
     $('frameOut'),
     `${fps.toFixed(1)} fps · seq ${((seq - 1) & 255)} · ${FRAME_BYTES} B/frame\n` +
-    `sent ${sent} · dropped ${dropped}${sink ? ` · sink ${sink.kind ?? 'sim'}` : ' · sink none'}`,
+    `sent ${sent} · dropped ${dropped}${sink ? ` · sink ${sink.kind ?? 'sim'}` : ' · sink none'}` +
+    watchLine(),
   );
 
   // The pan advances every frame even when the capture bytes do not change, so
@@ -1139,33 +1140,28 @@ window.addEventListener('resize', () => sim.resize());
 // ---------------------------------------------------------------------------
 
 /**
- * What blanks the console is the browser, not this page.
+ * Watchdogs DETECT; they never reload. (An earlier revision reloaded the
+ * page on a stale wake or a paint stall, and that was wrong for THIS page:
+ * a reload drops the serial port — Web Serial needs a user gesture, so a
+ * reloaded console cannot re-open COM8 by itself — which turns every
+ * hiccup into a dark wall and a human click. And a page that reloads on
+ * every stall is a wall that blinks. Detection without destruction:
+ * record the event, show it in the readout, and for the grey page try a
+ * non-destructive revive of the painting. The wall's stream lives in the
+ * worker clock and the serial port, NOT in the painting, so the wall keeps
+ * lighting through all of this — which is the point of the whole design.)
  *
- * Measured: the page leaks nothing (JS heap, DOM nodes and server RSS all
- * flat for minutes in every mode), and nothing here navigates or clears the
- * DOM. What DOES blank a tab on a schedule is the tab lifecycle the browser
- * owns: Edge's Sleeping Tabs (five minutes by default), Chrome's Memory
- * Saver and Power Saver freeze or discard a background tab, and the tab
- * comes back a blank page that needs a manual refresh. The audio keep-alive
- * exempts a tab Chrome has heard a click in; a tab nobody clicked, and any
- * policy with no audio exemption, is unprotected — and no page can stop a
- * discard once the browser has decided.
- *
- * So the page heals itself instead. The frame clock stamps a heartbeat into
- * localStorage once a second; when the tab becomes visible again, a stale
- * heartbeat means the page was frozen — its timers, worker and streams died
- * with it — and the page reloads. Everything the wall shows lives on the
- * server, so a reload is cheap and loses nothing the wall is displaying.
- *
- * The reload is rate-limited: a page that reload-storms is a page whose
- * server is down, and hammering a dead server is worse than a stale console.
+ * The measurements behind the two detectors (see also keep-alive.js):
+ * Edge's Sleeping Tabs, Chrome's Memory Saver and Power Saver freeze a
+ * background tab's timers and worker — the heartbeat goes stale; and the
+ * plain-grey-window failure (no Aw Snap) is the compositor producing no
+ * frames while the page's JS stays alive — the rAF probe goes silent.
  */
 const HEARTBEAT_KEY = 'wall-heartbeat';
-const RELOAD_KEY = 'wall-heartbeat-reload';
+const EVENTS_KEY = 'wall-events';
 const HEARTBEAT_WRITE_MS = 1000;
-/** A wake-up older than this was frozen: the streams cannot have survived. */
+/** A wake-up older than this was frozen. */
 const STALE_RESUME_MS = 10_000;
-const RELOAD_COOLDOWN_MS = 60_000;
 
 function stampHeartbeat() {
   try {
@@ -1175,32 +1171,162 @@ function stampHeartbeat() {
   }
 }
 
-// A fresh load is alive: stamp BEFORE any resume check can read the store, so
-// the first pageshow of a healthy boot never reloads.
+// A fresh load is alive: stamp before any resume check can read the store.
 stampHeartbeat();
 let lastBeatMs = Date.now();
+
+/** A capped ring of {kind, at} — the show's own incident log, visible to the owner. */
+function recordEvent(kind) {
+  let events = [];
+  try {
+    events = JSON.parse(localStorage.getItem(EVENTS_KEY) ?? '[]');
+    if (!Array.isArray(events)) events = [];
+  } catch {
+    events = [];
+  }
+  events.push({ kind, at: Date.now() });
+  while (events.length > 20) events.shift();
+  try {
+    localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
+  } catch {
+    // Storage off: the watchdog records nothing; the wall is unaffected.
+  }
+}
+
+function readEvents() {
+  try {
+    const e = JSON.parse(localStorage.getItem(EVENTS_KEY) ?? '[]');
+    return Array.isArray(e) ? e : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The owner-facing summary for the frame line: what the browser did to this
+ * tab, and the promise that matters — the serial stream lives in the worker
+ * and the port, so a faltering browser never took the wall down with it.
+ */
+function watchLine() {
+  const events = readEvents();
+  if (events.length === 0) return '';
+  const n = (kind) => events.filter((e) => e.kind === kind).length;
+  const last = events[events.length - 1];
+  const at = new Date(last.at).toLocaleTimeString();
+  const parts = [];
+  if (n('paint-stall') > 0) parts.push(`${n('paint-stall')} paint stalls`);
+  if (n('frozen') > 0) parts.push(`${n('frozen')} frozen wakes`);
+  if (parts.length === 0) parts.push(`${events.length} browser events`);
+  return `\nWATCH: ${parts.join(' · ')} (last ${at}) — the browser faltered; the wall stream never stopped`;
+}
 
 function resumeCheck() {
   if (document.visibilityState !== 'visible') return;
   let beatMs = 0;
-  let reloadMs = 0;
   try {
     beatMs = Number(localStorage.getItem(HEARTBEAT_KEY) ?? 0);
-    reloadMs = Number(sessionStorage.getItem(RELOAD_KEY) ?? 0);
   } catch {
     return;
   }
-  if (Date.now() - beatMs <= STALE_RESUME_MS) return;
-  if (Date.now() - reloadMs < RELOAD_COOLDOWN_MS) return;
-  try {
-    sessionStorage.setItem(RELOAD_KEY, String(Date.now()));
-  } catch {
-    // Best effort: without storage the cooldown is gone, and one reload stands.
-  }
-  location.reload();
+  // A stale heartbeat on wake says: the browser froze this tab, and while it
+  // was frozen the streams died with it (worker clock, serial in-flight).
+  // The clock re-arms itself on the first tick; the owner sees the count.
+  if (Date.now() - beatMs > STALE_RESUME_MS) recordEvent('frozen');
 }
 document.addEventListener('visibilitychange', resumeCheck);
 addEventListener('pageshow', resumeCheck);
+
+/**
+ * The grey page: the tab is visible, the frame clock is running (it lives in
+ * a worker, far from the compositor), and the window paints NOTHING — full
+ * grey, no Aw Snap. That is the compositor/GPU process failing to produce
+ * frames, and the heartbeat cannot see it: the page is alive, only the
+ * painting is dead, and no wake event fires because the tab was never hidden.
+ *
+ * requestAnimationFrame is the page's probe for the painting: rAF fires only
+ * when the compositor asks for a frame. The frame loop deliberately does NOT
+ * use rAF (a hidden tab must keep streaming), so a dedicated rAF pulse costs
+ * nothing and tells the truth: a VISIBLE tab whose rAF goes silent for
+ * RAF_STALL_MS has no compositor — the PREVIEW is dead (the wall keeps
+ * lighting: the stream is in the worker and the port).
+ *
+ * The cure is non-destructive: re-allocate the canvas backing store and
+ * nudge the compositing layer, which is the in-page trick that makes
+ * Chromium rebuild a dead paint pipeline WITHOUT touching the serial port.
+ * Every stall is recorded and counted in the readout, so the owner can see
+ * it happening, and a human F5 stays the last resort — not the reflex.
+ *
+ * The beat rides in localStorage (stamped at 2 Hz from the rAF itself) so
+ * the check runs on the worker-driven tick and a test can drive it.
+ */
+const RAF_BEAT_KEY = 'wall-raf-beat';
+const RAF_BEAT_WRITE_MS = 500;
+/** A visible tab's compositor missing for this long is dead, not busy. */
+const RAF_STALL_MS = 10_000;
+let lastRafWriteMs = 0;
+
+function stampRafBeat() {
+  const now = Date.now();
+  if (now - lastRafWriteMs >= RAF_BEAT_WRITE_MS) {
+    lastRafWriteMs = now;
+    try {
+      localStorage.setItem(RAF_BEAT_KEY, String(now));
+    } catch {
+      // Storage off: the paint watchdog self-cancels, like the heartbeat.
+    }
+  }
+}
+
+(function rafPulse() {
+  stampRafBeat();
+  requestAnimationFrame(rafPulse);
+})();
+
+/**
+ * Revive the painting without touching the wall: resizing the canvas makes
+ * Chromium re-allocate its backing store and rebuild the compositor layer,
+ * and the transform nudge forces the document layer to re-composite. Both
+ * are pure paint-side operations: the serial port, the worker clock and the
+ * in-flight frames are untouched, so the COM8 stream never blinks.
+ */
+function revivePainting() {
+  try {
+    const w = canvas.width;
+    const h = canvas.height;
+    canvas.width = w + 1; // the re-allocation: same CSS box, new store
+    canvas.width = w;
+    sim.resize();
+    document.body.style.transform = 'translateZ(0)';
+    requestAnimationFrame(() => {
+      document.body.style.transform = '';
+    });
+  } catch {
+    // A failed revive is the same as no revive; the wall is unaffected.
+  }
+}
+
+function paintCheck() {
+  // Only a visible tab is expected to paint: a hidden tab has no rAF by design.
+  if (document.visibilityState !== 'visible') return;
+  let beat = 0;
+  try {
+    beat = Number(localStorage.getItem(RAF_BEAT_KEY) ?? 0);
+  } catch {
+    return;
+  }
+  if (beat === 0 || Date.now() - beat <= RAF_STALL_MS) return;
+  // One strike per stall: FORCE the beat fresh (the 2 Hz throttle must not
+  // swallow this write, or every tick after a stall records another one),
+  // record it, and try to revive the paint.
+  lastRafWriteMs = Date.now();
+  try {
+    localStorage.setItem(RAF_BEAT_KEY, String(lastRafWriteMs));
+  } catch {
+    // Storage off: nothing to stamp.
+  }
+  recordEvent('paint-stall');
+  revivePainting();
+}
 
 // ---------------------------------------------------------------------------
 // Go
@@ -1245,6 +1371,9 @@ clock.onTick = () => {
       lastBeatMs = wallNow;
       stampHeartbeat();
     }
+    // The paint watchdog rides the same worker-driven tick: it must run when
+    // the compositor does NOT, which is exactly the grey-page case.
+    paintCheck();
     // Never let the schedule drift behind the clock: a throttled or suspended
     // tab resumes at the current frame instead of replaying a backlog.
     next = Math.max(next + FRAME_MS, now - FRAME_MS);

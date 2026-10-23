@@ -331,7 +331,7 @@ test('the console carries the gallery cadence, and mirrors the server that set i
   }
 });
 
-test('a console frozen by the browser reloads itself when it wakes', async (t) => {
+test('the watchdogs record a frozen tab and NEVER reload it', async (t) => {
   const chrome = findChrome();
   if (chrome === null) { t.skip('no browser on this machine'); return; }
 
@@ -353,43 +353,89 @@ test('a console frozen by the browser reloads itself when it wakes', async (t) =
       Number(localStorage.getItem('wall-heartbeat')) > 0 ? 'beating' : null
     )()`).catch(() => null), 15_000);
 
-    // Simulate the browser's freeze: the page is stale by a minute, and the
-    // tab wakes up. The marker rides in sessionStorage, which survives the
-    // reload, so what we read afterwards is proof of what happened.
+    // A page-level sentinel: a RELOAD would wipe it. The old watchdog reloaded
+    // on wake, and that was the bug this pins shut — Web Serial needs a user
+    // gesture, so a reloaded console cannot re-open COM8: the cure was a dark
+    // wall. The watchdog now records, and does not touch navigation.
     await cdp.eval(tab, `(() => {
-      sessionStorage.setItem('watchdog-marker', 'armed');
+      window.__probe = 'alive';
       localStorage.setItem('wall-heartbeat', String(Date.now() - 60_000));
-      sessionStorage.removeItem('wall-heartbeat-reload');
       document.dispatchEvent(new Event('visibilitychange'));
       return 'fired';
     })()`);
 
-    // After the reload the app boots again: the marker is still there (same
-    // tab), the frame readout is live, and the heartbeat is fresh — a page
-    // that never reloaded would have no fresh heartbeat, and the marker
-    // proves the fresh readout came from the watchdog's reload, not from
-    // the original load.
-    const back = await waitFor(async () => cdp.eval(tab, `(() => {
-      const beat = Number(localStorage.getItem('wall-heartbeat') ?? 0);
-      const fresh = Date.now() - beat < 10_000;
-      const fps = (document.getElementById('frameOut')?.textContent ?? '');
-      return sessionStorage.getItem('watchdog-marker') === 'armed' && fresh && /fps/.test(fps)
-        ? 'recovered' : null;
-    })()`).catch(() => null), 20_000);
-    assert.equal(back, 'recovered', 'a woken console must reload itself, not sit blank until a human refreshes');
+    // The event is recorded...
+    const recorded = await waitFor(async () => cdp.eval(tab, `(() => {
+      const e = JSON.parse(localStorage.getItem('wall-events') ?? '[]');
+      return e.some((x) => x.kind === 'frozen') ? 'recorded' : null;
+    })()`).catch(() => null), 10_000);
+    assert.equal(recorded, 'recorded', 'a frozen wake-up is recorded in the incident log');
 
-    // The storm guard: a stale wake-up inside the cooldown must NOT reload
-    // again. The guard value is the proof — a reload re-stamps it, a page
-    // that correctly stays put does not.
-    const guard = await cdp.eval(tab, `(() => {
-      localStorage.setItem('wall-heartbeat', String(Date.now() - 60_000));
-      sessionStorage.setItem('wall-heartbeat-reload', String(Date.now()));
-      document.dispatchEvent(new Event('visibilitychange'));
-      return sessionStorage.getItem('wall-heartbeat-reload');
+    // ...and the page is the SAME page: the sentinel survived, so no reload
+    // happened, so the serial port (in this fake, the whole page state) lived.
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(await cdp.eval(tab, 'window.__probe'), 'alive',
+      'the watchdog must NOT reload: a reload drops the serial port and darkens the wall');
+  } finally {
+    if (proc !== null) proc.kill();
+    await serve.stop();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 12, retryDelay: 150 });
+    dropProfile(profile);
+  }
+});
+
+test('the grey page: paint stall recorded, canvas revived, page NOT reloaded', async (t) => {
+  const chrome = findChrome();
+  if (chrome === null) { t.skip('no browser on this machine'); return; }
+
+  const dir = mkdtempSync(join(tmpdir(), 'omp-paint-'));
+  const serve = await startServe(await freePort(), ['--data', join(dir, 'd.json'), ...noGuards()]);
+  const dbgPort = await freePort();
+  const profile = mkdtempSync(join(tmpdir(), 'omp-paint-profile-'));
+  let proc = null;
+
+  try {
+    const browser = await openBrowser(chrome, dbgPort, profile);
+    proc = browser.proc;
+    const cdp = browser.cdp;
+    const tab = await cdp.openTab(`${serve.base}/index.html`);
+
+    // The rAF pulse is real: a painting tab stamps its beat.
+    await waitFor(async () => cdp.eval(tab, `(() =>
+      Number(localStorage.getItem('wall-raf-beat')) > 0 ? 'painting' : null
+    )()`).catch(() => null), 15_000);
+
+    // Simulate the grey page: the compositor died (the beat goes stale) while
+    // the tab stayed visible. The worker-driven tick is the only thing alive,
+    // and that is exactly where paintCheck runs.
+    await cdp.eval(tab, `(() => {
+      window.__probe = 'alive';
+      localStorage.setItem('wall-raf-beat', String(Date.now() - 60_000));
+      return 'stalled';
     })()`);
-    await new Promise((r) => setTimeout(r, 2000));
-    const after = await cdp.eval(tab, `sessionStorage.getItem('wall-heartbeat-reload')`);
-    assert.equal(after, guard, 'the reload is rate-limited: a stale wake-up inside the cooldown stays put');
+
+    // The stall is recorded and shown in the readout, on the SAME page.
+    const back = await waitFor(async () => cdp.eval(tab, `(() => {
+      const e = JSON.parse(localStorage.getItem('wall-events') ?? '[]');
+      const fps = (document.getElementById('frameOut')?.textContent ?? '');
+      return e.some((x) => x.kind === 'paint-stall') && /WATCH:.*paint stalls/.test(fps)
+        ? 'recorded' : null;
+    })()`).catch(() => null), 20_000);
+    assert.equal(back, 'recorded', 'a visible grey page must record the stall and say so in the readout');
+
+    // The page is the SAME page: no reload, so the serial stream (the wall
+    // itself) never blinked. The revive is paint-side only: the canvas
+    // backing store is re-allocated, which is the in-page trick Chromium
+    // needs to rebuild a dead paint pipeline.
+    assert.equal(await cdp.eval(tab, 'window.__probe'), 'alive',
+      'the paint cure must NOT reload: the wall streams from the worker and the port');
+
+    // And painting resumed: a living compositor stamps the beat fresh again,
+    // so the cure (or the browser's own recovery) restored the frame loop.
+    const painting = await waitFor(async () => cdp.eval(tab, `(() =>
+      Date.now() - Number(localStorage.getItem('wall-raf-beat') ?? 0) < 5_000 ? 'painting' : null
+    )()`).catch(() => null), 15_000);
+    assert.equal(painting, 'painting', 'after the revive the compositor is painting again');
   } finally {
     if (proc !== null) proc.kill();
     await serve.stop();
