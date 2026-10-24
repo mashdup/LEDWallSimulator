@@ -121,16 +121,18 @@ on distros that block unprivileged user-SUID (24.04+), the
 our own code, and the flag is an app argument like `--kiosk`.
 
 **macOS**: electron-builder refuses to produce Mac binaries on Windows
-(signing and dmg tooling are macOS-only), so build on any Mac:
+(signing and dmg tooling are macOS-only). The release workflow builds the
+dmg on a macos runner; with the five Apple secrets present (the SAME names
+the Anvil/CodeHamrUI release uses) it signs and notarizes, absent them it
+ships unsigned:
 
-```
-git clone <repo> && cd LEDWallSimulator && npm ci && npm run dist:mac
-```
+- `MAC_CERT_P12` (base64 of the Developer ID .p12), `MAC_CERT_PASSWORD`
+- `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`
 
-Gives `LED Wall-<ver>.arm64.dmg` (+ zip). Unsigned local builds open with
-right-click → Open (Gatekeeper); Web Serial uses the macOS TCC prompt once,
-the app's permission handler answers the picker from then on - the same
-self-healing story as Windows.
+Local build on any Mac without secrets: `npm ci --omit=optional && npm run dist:mac`.
+Unsigned builds open with right-click → Open (Gatekeeper); Web Serial uses
+the macOS TCC prompt once, the app's permission handler answers the picker
+from then on - the same self-healing story as Windows.
 
 Data & logs land in the per-OS userData (`~/.config/led-wall-simulator/`
 Linux, `~/Library/Application Support/led-wall-simulator/` macOS).
