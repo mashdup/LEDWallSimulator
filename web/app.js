@@ -879,6 +879,7 @@ pollContent();
 function renderRelay(j) {
   const el = $('relayOut');
   if (el === null) return;
+  syncRelayUi(j);
   if (!j.enabled) {
     setOutput(el, 'relay: off (guests reach this wall over the local network only)', 'warn');
     return;
@@ -909,6 +910,89 @@ async function pollRelay() {
     if (r.ok) renderRelay(await r.json());
   } catch { /* the wall's own server is the thing that just went away */ }
 }
+
+/**
+ * The relay dropdown: configure the pairing from the console, not from a
+ * command line. The server persists it (relay.json beside the gallery), so
+ * the packaged app needs no flags and no flag-laden shortcut: set it once,
+ * every boot relays by itself. Gated by the owner token server-side (401
+ * without it) - the hand that can re-point the relay is the hand that
+ * prunes the gallery. The key is never sent TO the page: an empty key field
+ * on Apply means 'keep the saved one', and GET says only keySet: true.
+ */
+const PUBLIC_RELAY = 'https://wall.hoa.family';
+// Same localStorage key draw.html uses: the owner types it once, per browser.
+const RELAY_OWNER_KEY = 'ledwall-owner-token';
+let relayEditing = false;
+
+function syncRelayUi(j) {
+  const sel = $('relayMode');
+  if (sel === null) return;
+  // The published console IS the relay (url '' while enabled): a relay
+  // cannot pair with itself, so the controls go dark there and the status
+  // line keeps telling the truth about the wall's last visit.
+  const isPublisher = j.enabled === true && j.url === '';
+  for (const id of ['relayMode', 'relayUrl', 'relayKey', 'relayOwner', 'relayApply']) {
+    const el = $(id);
+    if (el !== null) el.disabled = isPublisher;
+  }
+  if (isPublisher || relayEditing) return;
+  const url = String(j.url ?? '').replace(/\/+$/, '');
+  sel.value = j.enabled ? (url === PUBLIC_RELAY ? 'public' : 'custom') : 'off';
+  $('relayUrlRow').hidden = sel.value !== 'custom';
+  if (sel.value === 'custom' && j.url !== '') $('relayUrl').value = j.url;
+  $('relayKey').placeholder = j.keySet === true ? 'wall key (saved)' : 'wall key';
+}
+
+const relayOwner = $('relayOwner');
+if (relayOwner !== null) {
+  try { relayOwner.value = localStorage.getItem(RELAY_OWNER_KEY) ?? ''; } catch { /* private mode */ }
+  relayOwner.addEventListener('input', () => {
+    try { localStorage.setItem(RELAY_OWNER_KEY, relayOwner.value.trim()); } catch { /* private mode */ }
+  });
+}
+$('relayMode')?.addEventListener('change', (e) => {
+  relayEditing = true;
+  $('relayUrlRow').hidden = e.target.value !== 'custom';
+});
+$('relayUrl')?.addEventListener('input', () => { relayEditing = true; });
+$('relayKey')?.addEventListener('input', () => { relayEditing = true; });
+$('relayApply')?.addEventListener('click', async () => {
+  const mode = $('relayMode').value;
+  const cfg = mode === 'off'
+    ? { url: '' }
+    : mode === 'public'
+      ? { url: PUBLIC_RELAY, key: $('relayKey').value.trim() }
+      : { url: $('relayUrl').value.trim(), key: $('relayKey').value.trim() };
+  const owner = $('relayOwner').value.trim() || (() => {
+    try { return localStorage.getItem(RELAY_OWNER_KEY) ?? ''; } catch { return ''; }
+  })();
+  try {
+    const r = await fetch('/relay', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-wall-owner': owner },
+      body: JSON.stringify(cfg),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401) {
+      setOutput($('relayOut'), 'relay: owner token needed - the server prints it at startup (this box remembers it, and draw.html shares it)', 'err');
+      return;
+    }
+    if (!r.ok) {
+      setOutput($('relayOut'), `relay: ${j.why ?? `refused (HTTP ${r.status})`}`, 'err');
+      return;
+    }
+    relayEditing = false;
+    $('relayKey').value = '';
+    setOutput($('relayOut'), j.enabled
+      ? `relay: pointed at ${j.url} - dialling out, and every later start will relay by itself`
+      : 'relay: off - guests reach this wall over the local network only', 'ok');
+    pollRelay();
+  } catch (err) {
+    setOutput($('relayOut'), `relay: the server did not answer (${err.message})`, 'err');
+  }
+});
+
 setInterval(pollRelay, 5_000);
 pollRelay();
 

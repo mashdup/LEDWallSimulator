@@ -16,7 +16,8 @@ the serial device. Dev and the packaged binary run the identical shape.
 npm run wall                        # dev run from the repo
 npm run wall -- --kiosk             # fullscreen, always-on-top
 npm run wall -- --relay https://wall.hoa.family --relay-key <hex>
-                                    # pull guest drawings from the public relay
+                                    # one-shot relay pairing (the console dropdown
+                                    # is the normal way; see "The relay" below)
 npm run wall -- --debug             # DevTools + CDP on 127.0.0.1:9223 (for probes)
 npm run wall -- http(s)://...       # drive a published console instead of local
 ```
@@ -59,6 +60,20 @@ browser:
 The page keeps its watchdogs in both modes (a `WATCH:` line in the fps
 readout, incident ring in `localStorage['wall-events']`).
 
+## The relay (guest drawings from phones)
+
+Set it once in the console, no command line, no shortcut flags: the
+**Relay** dropdown (Off / wall.hoa.family / Custom) + the wall key from the
+relay's docker logs + the owner token. The server persists the pairing in
+`relay.json` beside the gallery, so every later start — app restart, machine
+reboot, bare portable .exe — relays by itself. The status line says what the
+wall is doing (`synced N s ago · N drawings`); the wall key is never served
+back to any page, and re-pointing the relay needs the owner token (the hand
+that prunes the gallery is the only hand allowed to move the plumbing).
+
+The `--relay/--relay-key` flags still work and win for the boot they are
+given — handy for a factory-style one-shot before a show.
+
 ## Building the binaries
 
 ```
@@ -86,12 +101,13 @@ decisions, autostart outcomes. On an incident, read the tail of that file.
 
 1. Run `LED Wall Setup <ver>.exe` (one click), or drop `LED Wall <ver>.exe`
    (portable) anywhere.
-2. Create the shortcut the show uses:
-   `"...\LED Wall 0.11.0.exe" --kiosk --relay https://wall.hoa.family --relay-key <key>`
-   (the key is paired on the relay; see `relay/README.md`)
-3. Put the shortcut in `shell:startup` for a cold-boot-to-show machine.
-4. Connect at the wall page once if the device picker must see a specific
-   port; by default the app picks the wch UART (COM8) by itself.
+2. Put a shortcut to it in `shell:startup` for a cold-boot-to-show machine
+   (add `--kiosk` to the shortcut's target for fullscreen).
+3. Open the page, pick the **Relay** dropdown → wall.hoa.family, paste the
+   wall key + owner token, Apply. Done once; the machine relays forever
+   after (see "The relay").
+4. The app picks the wch UART (COM8) by itself; Connect only if the picker
+   must see a specific port.
 
 ## Repo map
 

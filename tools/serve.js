@@ -24,7 +24,7 @@
 
 import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -402,7 +402,8 @@ function resolveDataFile(argv) {
   return i < 0 ? DATA_FILE : resolve(argv[i + 1] ?? DATA_FILE);
 }
 
-const drawings = new DrawingStore(resolveDataFile(process.argv.slice(2))).load();
+const dataFile = resolveDataFile(process.argv.slice(2));
+const drawings = new DrawingStore(dataFile).load();
 
 /**
  * The guest page's guards. web/public.html is handed to people with no account
@@ -440,12 +441,119 @@ const auth = makeAuth(owner.token);
 /**
  * The relay client: this wall's side of the public queue (see
  * tools/relay-client.js for why the wall dials out, and why offline is a
- * normal state rather than an error). Off unless --relay names a relay.
+ * normal state rather than an error). The pairing lives in two places:
+ * command-line flags (one-shot for this boot - a shortcut may keep them) and
+ * relay.json beside the data file (the console's Relay dropdown writes it).
+ * The file is what makes the packaged app usable with no flags at all: the
+ * owner configures the relay ONCE in the browser, and every later start -
+ * app restart, machine reboot, fresh binary - relays by itself. Flags win
+ * for the boot they are given.
  */
-const relayCfg = resolveRelay(process.argv.slice(2));
-const relay = relayCfg.url === '' ? null
+const relayFile = join(dirname(dataFile), 'relay.json');
+
+function readRelayFile() {
+  try {
+    return JSON.parse(readFileSync(relayFile, 'utf8'));
+  } catch {
+    return { url: '', key: '', intervalMs: 5_000 };
+  }
+}
+
+function cleanRelayCfg(raw) {
+  const url = String(raw?.url ?? '').trim().replace(/\/+$/, '');
+  const key = String(raw?.key ?? '').trim();
+  const ms = Number(raw?.intervalMs);
+  // Only http(s) is a relay URL: a 'file:' or 'javascript:' URL is not a
+  // queue, and a wall that is told to dial there must simply not dial.
+  return {
+    url: /^https?:\/\/.+/i.test(url) ? url : '',
+    key,
+    intervalMs: Number.isInteger(ms) && ms >= 250 ? ms : 5_000,
+  };
+}
+
+let relayCfg = resolveRelay(process.argv.slice(2));
+if (relayCfg.url === '') relayCfg = cleanRelayCfg(readRelayFile());
+
+let relay = relayCfg.url === '' ? null
   : makeRelayClient({ store: drawings, url: relayCfg.url, key: relayCfg.key, intervalMs: relayCfg.intervalMs,
       log: (m) => console.log(m) });
+
+/**
+ * Point the wall at a relay (or off it), live. The client object closes over
+ * its url and key, so changing the pairing means making a new one - which
+ * also means a reconfigured client never shares a half-finished sync with
+ * the old target: the old one is stopped first, and the store's cursor is
+ * per-relay in the store meta, so a new relay syncs from zero.
+ */
+function setRelay(rawCfg) {
+  const cfg = cleanRelayCfg(rawCfg);
+  if (cfg.url !== '' && cfg.key === '') {
+    // A relay pointed at without a key is a party that syncs to nothing and
+    // says so with 401s in the log; refusing the half-config is kinder.
+    return { ok: false, why: 'the wall key is required - it is printed once in the relay\'s docker logs' };
+  }
+  relay?.stop();
+  relay = cfg.url === '' ? null
+    : makeRelayClient({ store: drawings, url: cfg.url, key: cfg.key, intervalMs: cfg.intervalMs,
+        log: (m) => console.log(m) });
+  relayCfg = cfg;
+  try {
+    writeFileSync(relayFile, JSON.stringify(cfg));
+  } catch (err) {
+    // The live client is already switched: the config works for THIS boot;
+    // say plainly that the next boot will not remember it.
+    console.log(`serve: relay.json not saved: ${err.message} - the change lives only in this session`);
+  }
+  console.log(cfg.url === ''
+    ? 'serve: relay off (set from the console)'
+    : `serve: relay ${cfg.url} (set from the console)`);
+  // A client that is built and never started is a configured relay that
+  // syncs exactly once - at configure time - and then never again: start()
+  // is what arms the ticking loop.
+  relay?.start();
+  return { ok: true, enabled: cfg.url !== '', url: cfg.url };
+}
+
+/**
+ * POST /relay - the console's Relay dropdown lands here. Owner-token-gated:
+ * moving the party's plumbing takes the same hand that prunes the gallery.
+ */
+async function handleRelayPost(req, res) {
+  if (!isOwnerRequest(req)) {
+    respond(res, 401, { 'Content-Type': 'text/plain; charset=utf-8' },
+      'X-Wall-Owner (the owner token) is required to change the relay\n');
+    return;
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 8192) { // a relay config is ~200 bytes; more is not a config
+      req.destroy();
+      respond(res, 413, { 'Content-Type': 'text/plain; charset=utf-8' }, 'config too large\n');
+      return;
+    }
+    chunks.push(chunk);
+  }
+  let body;
+  try {
+    body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    body = null;
+  }
+  if (body === null || typeof body !== 'object') {
+    respond(res, 400, { 'Content-Type': 'text/plain; charset=utf-8' }, 'not a legal config\n');
+    return;
+  }
+  // An empty key means 'keep the saved one' - the console masks the key
+  // and must not require retyping it to change only the URL.
+  const next = { ...relayCfg, ...body };
+  if (String(body.key ?? '').trim() === '' && String(body.url ?? '').trim() !== '') next.key = relayCfg.key;
+  const out = setRelay(next);
+  respond(res, out.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' },
+    JSON.stringify(out));
+}
 
 /**
  * isOwnerRequest(req) - the owner token, presented on any verb.
@@ -583,6 +691,10 @@ const server = createServer(async (req, res) => {
       await handleDrawings(req, res, url);
       return;
     }
+    if (url.pathname === '/relay') {
+      await handleRelayPost(req, res);
+      return;
+    }
     respond(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, `404 Not Found: ${req.url}\n`);
     return;
   }
@@ -599,14 +711,15 @@ const server = createServer(async (req, res) => {
     return;
   }
   // GET /relay - what the wall is doing about the public relay, for the
-  // console. Read only: the pairing is a command-line flag, and an endpoint
-  // that could change the relay URL mid-party is a way to break the party.
+  // console. POST (the dropdown's Apply) is dispatched with the other POST
+  // endpoints up top: owner-token-gated, see handleRelayPost.
   if (url.pathname === '/relay') {
     const st = relay === null ? null : relay.status;
     respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
       JSON.stringify({
         enabled: st !== null,
         url: st?.url ?? '',
+        keySet: relayCfg.key !== '',
         lastError: st?.lastError ?? null,
         syncedAt: st?.syncedAt ?? 0,
         sent: st?.sent ?? 0,

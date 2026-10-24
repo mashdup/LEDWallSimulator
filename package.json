@@ -1,6 +1,6 @@
 {
   "name": "led-wall-simulator",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "private": true,
   "type": "module",
   "main": "tools/electron/main.cjs",

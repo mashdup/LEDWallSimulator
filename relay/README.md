@@ -47,7 +47,9 @@ docker compose up -d --build
 docker logs ledwall-relay          # prints the wall key once, and the owner token
 docker compose logs -f ledwall-relay
 
-# on the wall laptop
+# on the wall laptop - the console's Relay dropdown (Off / wall.hoa.family /
+# Custom): pick it, paste the key, Apply; relay.json remembers it for every
+# later boot. The command-line form still works and wins for its own boot:
 npm run serve -- --relay https://wall.hoa.family --relay-key <the key from the log>
 ```
 
@@ -154,8 +156,8 @@ generates the frames and hands them to `navigator.serial` itself, and HTTPS is a
 secure context, so the serial API exists on the public page exactly as it does
 on `http://127.0.0.1:8080`. COM8 belongs to the browser, not to the server.
 
-What the console then asks the relay for — and the reason all of it is behind
-the session — is the same API the console uses on the wall: `/content`,
+What the console then asks the relay for ï¿½ and the reason all of it is behind
+the session ï¿½ is the same API the console uses on the wall: `/content`,
 `/content/frame`, the gallery list, saving and pruning. The relay answers them
 from an in-memory content state plus the store. `/serial` answers `[]`: there is
 no Node serial port on this machine, and the console already treats an empty
@@ -165,7 +167,7 @@ list as "nothing to warn about".
 the content state, not the gallery list. The role is the **Host** header, not a
 path prefix, for a specific reason: the console imports `./app.js` and
 `../core/x.js`, and mounted at `/console` every one of those resolves outside
-the mount — the page would 404 its own brain. A dedicated host serves the page
+the mount ï¿½ the page would 404 its own brain. A dedicated host serves the page
 at `/` and the module graph resolves unchanged; and the guest host, the one on
 the printed cards, is a separate dispatch that never sees a console route.
 
@@ -174,7 +176,7 @@ cross-site request carries no cookie, so there is no CSRF token to forget and no
 CORS surface. A restart signs everyone out. Sign-in is rate-gated per address,
 and a wrong token answers one sentence and mints nothing.
 
-An empty owner token means the console is **off**, and it says so — an
+An empty owner token means the console is **off**, and it says so ï¿½ an
 unauthenticated control panel for a wall is not a configuration, it is an
 exposure.
 

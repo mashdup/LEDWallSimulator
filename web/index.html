@@ -125,10 +125,27 @@
         <a href="./public.html"><button type="button">Guest page</button></a>
         <span class="note" id="galCount"></span>
       </div>
-      <!-- The relay, read-only here. The wall DIALS OUT to it (relay/README.md:
-           the wall is never reached), and the pairing is a command-line flag,
-           so the console's job is to say what the wall is doing about it - not
-           to offer a field that would change the URL mid-party. -->
+      <!-- The relay, in the console. The wall DIALS OUT to it (relay/README.md:
+           the wall is never reached). It used to be pairing-by-command-line-
+           flag only, which made the packaged app need a flag-laden shortcut;
+           now the console configures it (the server persists relay.json beside
+           the gallery) and the change is owner-token-gated - the only hand
+           that can re-point the relay is the hand that prunes the gallery. -->
+      <div class="row">
+        <label>Relay
+          <select id="relayMode">
+            <option value="off">Off — local network only</option>
+            <option value="public">wall.hoa.family — public queue</option>
+            <option value="custom">Custom URL…</option>
+          </select>
+        </label>
+      </div>
+      <label id="relayUrlRow" hidden>Relay URL <input id="relayUrl" type="text" placeholder="https://relay.example" spellcheck="false"></label>
+      <div class="row">
+        <input id="relayKey" type="password" size="22" placeholder="wall key" autocomplete="off" spellcheck="false">
+        <input id="relayOwner" type="password" size="22" placeholder="owner token" autocomplete="off" spellcheck="false">
+        <button id="relayApply" type="button">Apply</button>
+      </div>
       <div class="row">
         <span class="note" id="relayOut">relay: checking…</span>
       </div>
