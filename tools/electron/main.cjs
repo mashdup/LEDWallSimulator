@@ -181,6 +181,35 @@ if (!app.requestSingleInstanceLock()) {
       win.focus();
       log(`electron: window at ${JSON.stringify(win.getBounds())} on ${JSON.stringify(screen.getPrimaryDisplay().workArea)}`);
     });
+    // The owner token is the wall's own authority, generated at first start
+    // and kept in userData beside the gallery. A human pasting it into the
+    // console's boxes from a log file is a trap (the dev repo has a different
+    // token from the installed app - measured: owner pastes the wrong one,
+    // gets 401, 'it doesn't work'). The shell KNOWS the token: seed it into
+    // the page's localStorage (the key draw.html and the relay form share),
+    // and pre-fill the form's box. Local-only: this code runs inside the app
+    // on the machine that owns the file; nothing about the token crosses the
+    // network.
+    const ownerSeed = () => {
+      try {
+        return fs.readFileSync(path.join(path.dirname(DATA_FILE), 'owner-token.txt'), 'utf8').trim();
+      } catch {
+        return '';
+      }
+    };
+    const seedOwner = () => {
+      const tok = ownerSeed();
+      if (tok === '') return;
+      win.webContents
+        .executeJavaScript(
+          `(() => { try { localStorage.setItem('ledwall-owner-token', ${JSON.stringify(tok)}); } catch {}
+            const el = document.getElementById('relayOwner');
+            if (el && el.value === '') el.value = ${JSON.stringify(tok)}; })()`,
+        )
+        .catch(() => { /* page not ready; the Apply fallback reads localStorage */ });
+    };
+    win.webContents.on('did-finish-load', seedOwner);
+
     // Serial self-heal on every page load (boot, crash-reload, restart).
     // The page reopens GRANTED ports by itself (navigator.getPorts is
     // gesture-free); when NOTHING is granted - a first launch, or Electron
