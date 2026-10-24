@@ -2,6 +2,7 @@
   "name": "led-wall-simulator",
   "version": "0.11.2",
   "private": true,
+  "author": "hoa.family <wall@hoa.family>",
   "type": "module",
   "main": "tools/electron/main.cjs",
   "description": "1m^2 APA106/PL9823 curtain wall: browser is the brain, ESP32 is a dumb pixel sink.",
@@ -12,7 +13,8 @@
     "wall": "node tools/start.js --electron",
     "freeport": "node tools/freeport.js",
     "dist": "electron-builder --win",
-    "dist:mac": "electron-builder --mac"
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
   },
   "optionalDependencies": {
     "serialport": "^13.0.0"
@@ -28,6 +30,7 @@
       "output": "dist"
     },
     "asar": false,
+    "npmRebuild": false,
     "files": [
       "package.json",
       "tools/**",
@@ -65,6 +68,30 @@
         "zip"
       ],
       "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "tar.gz",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "Utility"
     }
   }
 }
