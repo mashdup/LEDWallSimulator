@@ -78,6 +78,7 @@ given — handy for a factory-style one-shot before a show.
 
 ```
 npm run dist        # Windows: dist\LED Wall <ver>.exe (portable) + Setup .exe
+npm run dist:linux  # Linux: AppImage + deb (x64) + tar.gz (x64, arm64)
 npm run dist:mac    # macOS (run ON a Mac): dmg + zip
 ```
 
@@ -96,6 +97,43 @@ Serial. `serialport` is an *optional* dependency for the CLI tools
 Both hold `drawings.json` (the gallery; owner token beside it) and
 **`wall.log`** — the venue incident log: renderer/GPU deaths, serial picker
 decisions, autostart outcomes. On an incident, read the tail of that file.
+
+## Linux & macOS
+
+**Linux x64** (builds natively here: `npm run dist:linux`):
+
+- `led-wall-simulator_<ver>_amd64.deb` — `sudo apt install ./led-wall-simulator_*_amd64.deb`
+- `LED Wall-<ver>.AppImage` — `chmod +x` and run (AppRun), no install at all
+- `led-wall-simulator-<ver>.tar.gz` — extract, run `./led-wall-simulator`
+
+**Linux arm64** (Raspberry Pi 4/5, ARM laptops, the little show-box):
+`led-wall-simulator-<ver>-arm64.tar.gz` — extract and run; built cross with
+`npmRebuild: false` because the app carries ZERO native modules.
+
+Serial on Linux: the ESP32's wch UART appears as `/dev/ttyUSB0` (kernel
+`ch341` driver, stock). The browser stack needs device permission:
+`sudo usermod -aG dialout $USER` (re-login once). That is the whole setup.
+
+Electron needs a desktop session's libraries (gtk3, nss, gbm, asound —
+standard on any desktop distro; a bare server/WSL needs them via apt) and,
+on distros that block unprivileged user-SUID (24.04+), the
+`--no-sandbox` flag: the app's window is the only thing that runs, it is
+our own code, and the flag is an app argument like `--kiosk`.
+
+**macOS**: electron-builder refuses to produce Mac binaries on Windows
+(signing and dmg tooling are macOS-only), so build on any Mac:
+
+```
+git clone <repo> && cd LEDWallSimulator && npm ci && npm run dist:mac
+```
+
+Gives `LED Wall-<ver>.arm64.dmg` (+ zip). Unsigned local builds open with
+right-click → Open (Gatekeeper); Web Serial uses the macOS TCC prompt once,
+the app's permission handler answers the picker from then on - the same
+self-healing story as Windows.
+
+Data & logs land in the per-OS userData (`~/.config/led-wall-simulator/`
+Linux, `~/Library/Application Support/led-wall-simulator/` macOS).
 
 ## Show-machine quick start
 
