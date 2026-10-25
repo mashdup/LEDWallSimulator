@@ -30,6 +30,16 @@ jobs:
           - os: macos-latest
             args: --mac
     runs-on: ${{ matrix.os }}
+    # secrets is not a legal context in step-level if: expressions, so the
+    # Apple material is lifted to job env (legal) and the build step branches
+    # on the env context (legal in step if:). The values are only ever handed
+    # to electron-builder by the signed step, below.
+    env:
+      MAC_SIGN_P12: ${{ secrets.MAC_CERT_P12 }}
+      MAC_SIGN_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      APPLE_ID_VALUE: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_VALUE: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,20 +62,20 @@ jobs:
         # family but NOT for CSC_LINK. So: no secret, no vars - a clean
         # unsigned build via documented auto-discovery skip; secret, full
         # sign + notarize.
-        if: ${{ matrix.args == '--mac' && secrets.MAC_CERT_P12 != '' }}
+        if: ${{ matrix.args == '--mac' && env.MAC_SIGN_P12 != '' }}
         run: npx electron-builder --mac --publish never
         env:
-          CSC_LINK: ${{ secrets.MAC_CERT_P12 }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_LINK: ${{ env.MAC_SIGN_P12 }}
+          CSC_KEY_PASSWORD: ${{ env.MAC_SIGN_PASSWORD }}
+          APPLE_ID: ${{ env.APPLE_ID_VALUE }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ env.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ env.APPLE_TEAM_VALUE }}
       - name: "build (unsigned: no mac secret, or not the mac job)"
         # --publish never: building on a v-tag makes electron-builder v26
         # try to publish a GitHub release itself (needs GH_TOKEN, exits 1,
         # poisons the job, release job never runs - measured on v0.11.3).
         # The release is this workflow's business, not electron-builder's.
-        if: ${{ !(matrix.args == '--mac' && secrets.MAC_CERT_P12 != '') }}
+        if: ${{ !(matrix.args == '--mac' && env.MAC_SIGN_P12 != '') }}
         run: npx electron-builder ${{ matrix.args }} --publish never
         env:
           # Explicit, so a pre-seeded runner can't auto-discover some other
