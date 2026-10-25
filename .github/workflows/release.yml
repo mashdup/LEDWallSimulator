@@ -43,25 +43,34 @@ jobs:
       - name: install
         run: npm ci --omit=optional --no-audit --no-fund
 
-      - name: build
-        # --publish never: building on a v-tag makes electron-builder v26
-        # try to publish a GitHub release itself (needs GH_TOKEN, exits 1,
-        # poisons the job and the release job never runs). The release is
-        # this workflow's business, not electron-builder's. (Anvil's
-        # workflow carries the same flag for the same reason.)
-        run: npx electron-builder ${{ matrix.args }} --publish never
+      - name: build (mac signed + notarized)
+        # The Apple env vars exist ONLY when the signing secret exists:
+        # electron-builder v26 reads an EMPTY CSC_LINK as a certificate path
+        # (the empty string resolves against the project dir -> 'not a file',
+        # a dead mac build - measured on v0.11.4's run). Anvil's fallback
+        # relied on 'empty means absent', which v26 grants for the APPLE_*
+        # family but NOT for CSC_LINK. So: no secret, no vars - a clean
+        # unsigned build via documented auto-discovery skip; secret, full
+        # sign + notarize.
+        if: ${{ matrix.args == '--mac' && secrets.MAC_CERT_P12 != '' }}
+        run: npx electron-builder --mac --publish never
         env:
-          # Apple signing + notarization, driven entirely by repo secrets -
-          # the same five names the Anvil (CodeHamrUI) release uses. With
-          # the secrets unset these are empty strings, which electron-builder
-          # treats as absent: the build stays unsigned (Anvil's fallback,
-          # proven through releases).
           CSC_LINK: ${{ secrets.MAC_CERT_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.MAC_CERT_P12 != '' && 'true' || 'false' }}
+      - name: build (unsigned: no mac secret, or not the mac job)
+        # --publish never: building on a v-tag makes electron-builder v26
+        # try to publish a GitHub release itself (needs GH_TOKEN, exits 1,
+        # poisons the job, release job never runs - measured on v0.11.3).
+        # The release is this workflow's business, not electron-builder's.
+        if: ${{ !(matrix.args == '--mac' && secrets.MAC_CERT_P12 != '') }}
+        run: npx electron-builder ${{ matrix.args }} --publish never
+        env:
+          # Explicit, so a pre-seeded runner can't auto-discover some other
+          # identity and ship a build signed by a cert this repo never set.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - uses: actions/upload-artifact@v4
         with:
