@@ -137,6 +137,18 @@ wall frames=412 meta=3 disc=0 resync=0 rewind=0 gaps=0 br=85/255 lim=8000 state=
 `led_wall_s3_usb` under load; a rarer, self-healing event than Adalight's). On the
 UART build both should sit at 0.
 
+`torn=` counts frames that decoded perfectly and were then **not painted**, because
+the previous refresh was still clocking out and the realtime pixels are the buffer
+that transfer reads — painting into it mid-transfer would put two frames on one
+refresh, which is a run of beads in colours nobody sent. It is the one corruption a
+byte-clean stream can cause, and it is a property of the host's pacing: a paced UART
+never races a ~20 ms refresh at 30 fps, a bursting USB-CDC host does. If `torn`
+stays 0 and the wall still flickers on a flat field, the fault is not in this path.
+`node tools/flicker.js --fps 42 --pace burst` is how you make it climb on purpose.
+A build that predates the field prints no `torn=` at all, which is not the same as
+`torn=0` — read the field list before concluding anything. See `firmware/README.md`
+for why the window may not exist at all (`strip.show()` measured blocking here).
+
 ### Measured on the real panel
 
 Both envs flashed and confirmed against the panel. Identical firmware and framing,

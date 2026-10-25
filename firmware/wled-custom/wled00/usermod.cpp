@@ -104,6 +104,10 @@ static uint32_t statDiscarded = 0;
 static uint32_t statResyncs   = 0;
 static uint32_t statRewinds   = 0;
 static uint32_t statGaps      = 0;
+// Frames decoded while the strip was still clocking out the previous one, so the
+// paint was skipped. See commitFrame(): this is the only way a byte-clean stream
+// can put two frames on one refresh.
+static uint32_t statTorn      = 0;
 
 #if LED_WALL_WIFI_OFF
 static bool     wifiPulled = false;
@@ -176,13 +180,39 @@ static void commitFrame() {
    */
   realtimeLock(realtimeTimeoutMs, REALTIME_MODE_ADALIGHT);
   if (!realtimeOverride) {
-    const uint8_t *rgb = rxBody + 1;
-    uint16_t n = strip.getLengthTotal();
-    if (n > (uint16_t)LED_WALL_LED_COUNT) n = (uint16_t)LED_WALL_LED_COUNT;
-    for (uint16_t i = 0; i < n; i++) {
-      setRealtimePixel(i, rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], 0);
+    /*
+     * Never paint while a transfer is clocking out.
+     *
+     * The realtime pixels ARE the buffer a transfer reads, so writing the next
+     * frame in while the previous one is still clocking out hands the beads a
+     * frame made of two frames: one run of beads from the old frame, the rest from
+     * the new. A run of beads in colours nobody sent, self-correcting at the next
+     * refresh, and invisible to every counter the host can see.
+     *
+     * Whether that window exists on this board is what torn= measures, and it is
+     * not settled here. This rig's own notes (and the enlarged RX ring) say
+     * strip.show() BLOCKS for the RMT transfer, in which case IsUpdating() is
+     * false by the time control returns and this branch never fires. NeoPixelBus's
+     * RMT methods post a DMA transfer and report IsUpdating() until the ISR
+     * reaps it, in which case the window is ~20 ms wide (400 APA106 beads, 30 bits
+     * apiece at a ~1.7 us bit) and a host that lands frames in bursts - USB-CDC
+     * delivers a whole frame at once, where a 921600 UART paces one per ~13 ms -
+     * lands the next one inside it. Either way this costs one comparison, and the
+     * counter says which world we are in: torn=0 forever is a blocked path, a
+     * climbing torn= is a bursting host. Skipping the paint is the right answer in
+     * the second case: the next show() renders the newest frame, one refresh late.
+     */
+    if (strip.IsUpdating()) {
+      statTorn++;
+    } else {
+      const uint8_t *rgb = rxBody + 1;
+      uint16_t n = strip.getLengthTotal();
+      if (n > (uint16_t)LED_WALL_LED_COUNT) n = (uint16_t)LED_WALL_LED_COUNT;
+      for (uint16_t i = 0; i < n; i++) {
+        setRealtimePixel(i, rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], 0);
+      }
+      strip.show();
     }
-    strip.show();
   }
   statFrames++;
 }
@@ -194,7 +224,9 @@ static void applyMeta() {
   // A brightness change has to reach the wall now, not at the next frame.
   if (realtimeMode) {
     realtimeLock(realtimeTimeoutMs, REALTIME_MODE_ADALIGHT);
-    if (!realtimeOverride) strip.show();
+    // Same reason as commitFrame(): a refresh already in flight carries the old
+    // brightness, and starting a second one is refused anyway. It lands next pass.
+    if (!realtimeOverride && !strip.IsUpdating()) strip.show();
   }
   statMeta++;
 }
@@ -334,10 +366,11 @@ void userLoop() {
   const uint32_t now = millis();
   if (serialCanTX && now - lastStatus >= 1000) {
     lastStatus = now;
-    Serial.printf_P(PSTR("wall frames=%lu meta=%lu disc=%lu resync=%lu rewind=%lu gaps=%lu br=%u/%u lim=%u wifi=%u woff=%lu state=%s\n"),
+    Serial.printf_P(PSTR("wall frames=%lu meta=%lu disc=%lu resync=%lu rewind=%lu gaps=%lu torn=%lu br=%u/%u lim=%u wifi=%u woff=%lu state=%s\n"),
                     (unsigned long)statFrames, (unsigned long)statMeta,
                     (unsigned long)statDiscarded, (unsigned long)statResyncs,
                     (unsigned long)statRewinds, (unsigned long)statGaps,
+                    (unsigned long)statTorn,
                     (unsigned)activeBrightness, (unsigned)wantBrightness,
                     (unsigned)limitMa, (unsigned)WiFi.getMode(),
 #if LED_WALL_WIFI_OFF

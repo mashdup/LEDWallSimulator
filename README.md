@@ -184,6 +184,21 @@ reported "No serial port was selected" with the wall in front of it.
 Data & logs land in the per-OS userData (`~/.config/led-wall-simulator/`
 Linux, `~/Library/Application Support/led-wall-simulator/` macOS).
 
+**A wall that flickers on the mac and not on Windows is almost certainly not
+the mac's code.** Measured on this panel: the app's fixed 30 fps stream lands
+byte-perfect (`disc=0 resync=0`, decoded == written) and 45 fps does too, so the
+bytes are not the fault — and a FLAT FIELD, where the host sends the same 1200
+bytes every frame, still grew runs of green beads at fixed columns. Data that
+never changes cannot be mis-rasterised, desynced, torn or dropped, so that one
+test (`node tools/flicker.js --fill ff0000 --duration 45000`, app closed) moves
+the fault to the beads' side of the pin: a bead that misreads a bit count latches
+the wrong colour and shifts the run behind it, which is why it looks like a
+column. What follows the host is the ground: the ESP32 is powered by and
+referenced to the host's USB while the beads run on the panel PSU. Bond PSU 0 V to
+ESP32 GND, and the flicker's neighbour (a supply sag) with it. Full write-up,
+including the ~49 fps ceiling from the APA106 refresh and the rig's `torn=`
+counter, in `firmware/README.md`.
+
 ## Show-machine quick start
 
 1. Run `LED Wall Setup <ver>.exe` (one click), or drop `LED Wall <ver>.exe`

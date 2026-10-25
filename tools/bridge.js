@@ -658,6 +658,8 @@ export function parseStatusLine(line) {
       case 'resync': out.resyncs = Number(value); break;
       case 'rewind': out.rewinds = Number(value); break;
       case 'gaps': out.seqGaps = Number(value); break;
+      // Only the WLED rig can see a refresh in flight; the sketch has no such field.
+      case 'torn': out.torn = Number(value); break;
       case 'stale': out.stale = Number(value); break;
       default: break;
     }

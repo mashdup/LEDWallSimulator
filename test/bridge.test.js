@@ -141,6 +141,34 @@ test('the status line parses back into the numbers a calibration run needs', () 
   assert.equal(parseSelftestLine('wall seq=0'), null);
 });
 
+test("the WLED rig's status line parses, including the torn counter", () => {
+  // Measured off the board verbatim, then with torn=3. The rig prints no sketch-
+  // only fields (no est=, no cap=, no rx=) and spells the budget lim=, so this
+  // line has to parse on its own terms: br is applied/wanted, gaps is seq deltas.
+  const line = 'wall frames=8797 meta=25 disc=0 resync=0 rewind=0 gaps=7 torn=3 br=85/195 lim=8000 wifi=0 woff=1 state=live';
+  const parsed = parseStatusLine(line);
+  assert.ok(parsed, 'the rig line must parse');
+  assert.equal(parsed.frames, 8797);
+  assert.equal(parsed.discarded, 0);
+  assert.equal(parsed.resyncs, 0);
+  assert.equal(parsed.rewinds, 0);
+  assert.equal(parsed.seqGaps, 7);
+  assert.equal(parsed.brightness, 85, 'applied');
+  assert.equal(parsed.brightnessCap, 195, 'wanted');
+  assert.equal(parsed.limitMa, 8000);
+  assert.equal(parsed.wifiMode, 0);
+  assert.equal(parsed.wifiOffs, 1);
+  assert.equal(parsed.state, 'live');
+  // The counter that matters for a flicker on a clean wire: a paint skipped
+  // because the previous refresh was still clocking out.
+  assert.equal(parsed.torn, 3);
+
+  // The sketch has no such field, and a missing field must not read as zero: 0
+  // says "no tearing", undefined says "this build cannot see tearing".
+  const sketch = parseStatusLine('wall seq=137 br=85/85 est=4210mA cap=8000mA limit=8000mA state=live rx=0 frames=412 disc=1 gaps=0');
+  assert.equal(sketch.torn, undefined, 'absent torn= must stay absent');
+});
+
 test('a frame that fails its end byte never reaches the LEDs', () => {
   const wall = brightWall();
   const white = new Uint8Array(RGB_BYTES).fill(255);

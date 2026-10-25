@@ -695,6 +695,82 @@ Measured with it: 454 frames across all seven phases, `disc=0 rewind=0 gaps=0`,
 the decoder keeps up. That is what cleared the firmware of a crash-reset theory
 for a panel that went dark mid-session.
 
+**A flat field is the discriminator between "the bytes are wrong" and "the beads
+misread bits".** Send a solid colour and the host sends the *same 1200 bytes every
+frame*. Nothing about the content can be at fault — no rasteriser, no desync, no
+torn frame, no dropped byte, no effect repainting — because the data does not
+change. If runs of beads still show colours nobody asked for, the fault is on the
+beads' side of the pin. That is the whole test, and it costs one command:
+
+```sh
+node tools/bridge.js --pattern all-red --port COM8 --duration 45000
+```
+
+**Measured on this panel, mac only: a static red field grows runs of green beads.**
+Every frame was byte-identical and every frame decoded — `wrote 29/s, decoded 29/s,
+disc=0 resync=0 rewind=0` across four 45 s flat fields (white, red, black, grey) and
+four 30 s brightness steps — and the wall still showed green runs at fixed columns,
+some flickering. A bead that misreads a *bit count* (a start bit it does not see,
+a bit stretched past its window, a brown-out reset mid-frame) latches its colour
+from the wrong slice of the stream and passes the rest downstream shifted, so the
+fault travels as a **run** of beads — which is what a "column" of the 20x20 matrix
+is — and the run's start moves because the marginal bit moves. On this wall's BGR
+order, a shifted red reads green/blue. The same wall, same cable, same firmware on
+Windows is stable, and swapping cables changes nothing, so what differs is the
+host the ESP32 is powered by and ground-referenced to.
+
+So the fix is not in the bytes. In order of what it costs:
+
+- **Bond the panel PSU's 0 V to the ESP32's GND.** The ESP32 is powered from the
+  host's USB, so its logic reference is the *host's* ground; the beads run on the
+  PSU's 5 V. With no bond between them the beads' input thresholds float, and
+  whether that is marginal depends on the host's earth path — an earthed desktop
+  is quiet, a two-pin brick is not. This is the difference between "the mac
+  flickers" and "the Windows box does not".
+- **Stop powering the ESP32 from the host's USB**; give it its own supply and keep
+  only the data pair and the bond common.
+- **Level-shift the data to 5 V** (the repo's own note: this is a PL9823-class
+  bead, and `WS2812B signal decodes *partially*` — the same marginality, seen from
+  the other side) and put ~300 Ω in series with the first bead's data in.
+- **Bulk capacitance at the injection point**, and inject at both ends of a 400-
+  bead run: a bead that browns out mid-frame resets and latches whatever bits
+  arrive next as its colour. If the runs get worse as the field gets brighter and
+  vanish at black, this and the ground bond are the two causes; the brightness
+  sweep above is what tells them apart.
+
+**The strip's refresh sets a hard ceiling of ~49 frames/s.** 400 APA106 beads are
+30 bits each at a ~1.7 µs bit, so one refresh is ~20 ms of wire. Measured on this
+wall, streaming the repo's own records: 30, 42 and 45 fps decode perfectly
+(`disc=0 resync=0 gaps=0`, `decoded == written`); at **60 fps** the stream
+ collapses — ~36 of 57 frames/s decoded, `disc~10/s`, `gaps~10/s` and
+**1000-4000 `resync`/s**, which is the decoder drowning in the middle of frames.
+Nothing may stream this wall faster than ~45 fps, and the app's fixed 30 fps is the
+right number, not a conservative one. `node tools/flicker.js` is the measurement:
+it streams at a chosen rate and prints the board's counter deltas in the same second.
+
+```sh
+node tools/flicker.js --fps 45      # clean
+node tools/flicker.js --fps 60      # collapse: 36 of 57 decoded, resync in the thousands
+node tools/flicker.js --fps 42 --pace burst --burst 3
+```
+
+**`torn=` is the counter for the one host-visible version of that fault** (the
+`wled-custom` rig; the sketch has no such field). The realtime pixels *are* the
+buffer a transfer reads, so painting the next frame while the previous one is still
+clocking out hands the beads a frame made of two frames — a run of beads in the next
+frame's colours, self-correcting at the next refresh, invisible to every host
+counter. **Whether that window exists on this board is what the counter measures,
+not what it assumes**: this rig's notes and the enlarged RX ring say `strip.show()`
+blocks for the transfer, in which case the branch never fires and `torn` sits at 0
+forever; NeoPixelBus's RMT methods post a DMA transfer and report busy until the ISR
+reaps it, in which case the window is ~20 ms wide and a bursting host (USB-CDC
+delivers a whole frame at once, where a 921600 UART paces one per ~13 ms) lands
+inside it. `commitFrame()` checks `strip.IsUpdating()` and skips the paint, so the
+newest frame lands one refresh late rather than partly — one comparison either way.
+Read it as a measurement: `torn` climbing says the host is bursting and the path is
+real; `torn=0` with a flicker on a flat field says the fault is electrical and no
+firmware change will move it.
+
 ---
 
 
