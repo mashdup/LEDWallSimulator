@@ -1,6 +1,6 @@
 {
   "name": "led-wall-simulator",
-  "version": "0.11.6",
+  "version": "0.11.7",
   "private": true,
   "author": "hoa.family <wall@hoa.family>",
   "homepage": "https://github.com/mashdup/LEDWallSimulator",
@@ -84,12 +84,12 @@
       "gatekeeperAssess": false,
       "entitlements": "tools/electron/entitlements.mac.plist",
       "entitlementsInherit": "tools/electron/entitlements.mac.plist",
-      "afterPack": "tools/electron/afterPack.cjs",
       "extendInfo": {
         "NSBluetoothAlwaysUsageDescription": "The LED wall lists serial devices, and macOS includes Bluetooth serial ports in that list.",
         "NSBluetoothPeripheralUsageDescription": "The LED wall lists serial devices, and macOS includes Bluetooth serial ports in that list."
       }
     },
+    "afterPack": "tools/electron/afterPack.cjs",
     "linux": {
       "target": [
         {

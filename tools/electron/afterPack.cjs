@@ -27,6 +27,21 @@
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+/*
+ * electron-builder's own logger. `context.packager.info` does not exist - it is
+ * `context.packager.appInfo` (a getter) for the app metadata, and the logger
+ * lives in builder-util. Calling the wrong one throws inside the hook and kills
+ * the whole mac build (measured: "context.packager.info.info is not a function"),
+ * so resolve the logger defensively and fall back to console.
+ */
+function logger(context) {
+  try {
+    const { log } = require('builder-util');
+    if (log && typeof log.info === 'function') return log;
+  } catch { /* not resolvable outside electron-builder */ }
+  return console;
+}
+
 const KEYS = {
   NSBluetoothAlwaysUsageDescription:
     'The LED wall lists serial devices, and macOS includes Bluetooth serial ports in that list.',
@@ -61,13 +76,14 @@ module.exports = async function afterPack(context) {
     if (/Helper(\s*\([^)]*\))?\.app$/.test(name.trim())) targets.push(path.join(frameworks, name.trim(), 'Contents', 'Info.plist'));
   }
 
+  const log = logger(context);
   const notes = [];
   for (const plist of targets) {
     const res = addKeys(plist, plutil);
-    if (!res.ok) context.packager.info.warn(`serial bluetooth plist: ${plist} - ${res.error}`);
+    if (!res.ok) log.warn(`serial bluetooth plist: ${plist} - ${res.error}`);
     else if (res.added.length) notes.push(`${path.basename(path.dirname(path.dirname(plist)))}: ${res.added.join(', ')}`);
   }
-  if (notes.length) context.packager.info.info(`serial bluetooth plist: ${notes.join(' | ')}`);
+  if (notes.length) log.info(`serial bluetooth plist: ${notes.join(' | ')}`);
 };
 
 // Plain node runs (the dev patch) reuse this with a console reporter.
