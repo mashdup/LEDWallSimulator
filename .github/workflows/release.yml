@@ -60,7 +60,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      - name: build (unsigned: no mac secret, or not the mac job)
+      - name: "build (unsigned: no mac secret, or not the mac job)"
         # --publish never: building on a v-tag makes electron-builder v26
         # try to publish a GitHub release itself (needs GH_TOKEN, exits 1,
         # poisons the job, release job never runs - measured on v0.11.3).
