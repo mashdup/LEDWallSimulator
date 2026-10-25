@@ -710,33 +710,61 @@ node tools/bridge.js --pattern all-red --port COM8 --duration 45000
 Every frame was byte-identical and every frame decoded — `wrote 29/s, decoded 29/s,
 disc=0 resync=0 rewind=0` across four 45 s flat fields (white, red, black, grey) and
 four 30 s brightness steps — and the wall still showed green runs at fixed columns,
-some flickering. A bead that misreads a *bit count* (a start bit it does not see,
-a bit stretched past its window, a brown-out reset mid-frame) latches its colour
-from the wrong slice of the stream and passes the rest downstream shifted, so the
-fault travels as a **run** of beads — which is what a "column" of the 20x20 matrix
-is — and the run's start moves because the marginal bit moves. On this wall's BGR
-order, a shifted red reads green/blue. The same wall, same cable, same firmware on
-Windows is stable, and swapping cables changes nothing, so what differs is the
-host the ESP32 is powered by and ground-referenced to.
+some flickering. A bead that misreads a *bit count* latches its colour from the
+wrong slice of the stream and passes the rest downstream shifted, so the fault
+travels as a **run** of beads — which is what a "column" of the 20x20 matrix is.
 
-So the fix is not in the bytes. In order of what it costs:
+**The colours say how many bits are being dropped, because the shifts are
+byte-aligned.** In this wall's BGR order a red bead is `B=0x00 G=0x00 R=0xFF`, and a
+bright green needs `G=0xFF` — the red byte landing in the green slot, i.e. **one
+byte late**. A blue bead is `B=0xFF G=0x00 R=0x00`, and blue showing **red** needs
+**two bytes late**. Measured on the wall: a blue field grew red pixels, a red field
+grew green ones, at fixed positions, some flickering.
 
-- **Bond the panel PSU's 0 V to the ESP32's GND.** The ESP32 is powered from the
-  host's USB, so its logic reference is the *host's* ground; the beads run on the
-  PSU's 5 V. With no bond between them the beads' input thresholds float, and
-  whether that is marginal depends on the host's earth path — an earthed desktop
-  is quiet, a two-pin brick is not. This is the difference between "the mac
-  flickers" and "the Windows box does not".
-- **Stop powering the ESP32 from the host's USB**; give it its own supply and keep
-  only the data pair and the bond common.
-- **Level-shift the data to 5 V** (the repo's own note: this is a PL9823-class
-  bead, and `WS2812B signal decodes *partially*` — the same marginality, seen from
-  the other side) and put ~300 Ω in series with the first bead's data in.
-- **Bulk capacitance at the injection point**, and inject at both ends of a 400-
-  bead run: a bead that browns out mid-frame resets and latches whatever bits
-  arrive next as its colour. If the runs get worse as the field gets brighter and
-  vanish at black, this and the ground bond are the two causes; the brightness
-  sweep above is what tells them apart.
+**The colours also say what triggers it: the low runs.** At this sketch's 350/1350 ns
+(1.7 us) bit, the longest low run in a flat field is 16 consecutive zeros for red and
+blue — **27.2 us** — against a latch-reset window in the 30 us region for these
+beads. White is 24 ones and has **no low run at all**; grey `#555555` (`01010101`)
+maxes out at **1.7 us**; black is 24 zeros, **40.8 us**, over the window — and
+invisible, because a shifted zero is dark. So:
+
+- **Power is ruled out, not assumed.** Flat white draws **8.0 A** at the app's
+  settings and **18.4 A** when the limit is raised, and was steady at every step
+  while 1766 records decoded with `disc=0 resync=0`. Flat red draws **2.7 A** and
+  broke. A sag does not get worse as the load drops by a factor of three.
+- **Brightness is ruled out by the same logic, and by the beads' own protocol:**
+  APA106 carries global brightness in a separate word, so the *colour bytes* —
+  and therefore the low runs — do not change with brightness at all. The white
+  ladder was clean at 1.9 A through 18.4 A.
+- **Content-dependence is the pattern, not the drawing:** red and blue (16 zeros)
+  break, white and grey do not, positions sit at fixed beads, and the affected set
+  moves as the content's bytes change. A 3 us margin against a reset window is
+  exactly the margin a host's ground offset and a data line 0.2 V short of `VIH`
+  can eat — which is why the same wall is steady on an earthed desktop and breaks
+  on the mac, and why four cables changed nothing.
+
+So the fix is the margin, in this order:
+
+1. **Level-shift the data to 5 V** — the Wiring section above prescribes exactly
+   this for "intermittent colour errors": a TXB0104, SN74AHCT1G08 or a 2N7000
+   low-side stage. `VIH >= 0.7 x VDD` = 3.5 V at 5 V; a bare GPIO is 3.3 V, and
+   0.2 V of spec deficit is the whole budget here. ~300 ohms in series at the
+   first bead damps the ringing that starts a false reset on a long low.
+2. **Bond the panel PSU's 0 V to the ESP32's GND at ONE node** — the first hard
+   requirement above; a floating reference spends the same margin.
+3. **A USB isolator (ADuM3160 module)** if the fault must stop following the host:
+   it passes the data and breaks the ground path entirely, which is the difference
+   between the desktop and the laptop. A **self-powered hub is not that test** —
+   it takes the host's 5 V away and leaves the ground continuous, and measured
+   here it changed nothing.
+4. **Free confirmation, no parts**: trim the PSU to **4.5 V**. `VIH` scales with
+   VDD, so 3.15 V puts the ESP32's 3.3 V *inside* spec. If the runs go on red, the
+   margin story is confirmed. Do not go below ~4.0 V; the beads' own floor is near
+   there, and check the meter — 5.3 V maximum for these beads.
+
+Do **not** shorten the bit period chasing this: 1.7 us -> 1.25 us would put 16 zeros
+at 20 us, and these beads are explicitly not WS2812B-timed — `WS2812B signal
+decodes *partially*` (Wiring above) is this same fault, seen from the other side.
 
 **The strip's refresh sets a hard ceiling of ~49 frames/s.** 400 APA106 beads are
 30 bits each at a ~1.7 µs bit, so one refresh is ~20 ms of wire. Measured on this

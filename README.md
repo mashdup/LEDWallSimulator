@@ -193,11 +193,27 @@ never changes cannot be mis-rasterised, desynced, torn or dropped, so that one
 test (`node tools/flicker.js --fill ff0000 --duration 45000`, app closed) moves
 the fault to the beads' side of the pin: a bead that misreads a bit count latches
 the wrong colour and shifts the run behind it, which is why it looks like a
-column. What follows the host is the ground: the ESP32 is powered by and
-referenced to the host's USB while the beads run on the panel PSU. Bond PSU 0 V to
-ESP32 GND, and the flicker's neighbour (a supply sag) with it. Full write-up,
-including the ~49 fps ceiling from the APA106 refresh and the rig's `torn=`
-counter, in `firmware/README.md`.
+column. The colours then do the measuring: in BGR a red bead showing bright green
+is **one byte late**, and a blue bead showing red is **two bytes late** — beads
+drop whole bytes, and the run travels downstream. What drops them is the **low
+run**: at a 1.7 µs bit, red and blue carry 16 consecutive zeros (**27.2 µs**)
+against a latch-reset window in the ~30 µs region for these beads, while white
+(24 ones, no low run at all) is steady at 8 A *and* at 18.4 A and grey `#555555`
+(1.7 µs) is steady at 8 A. Red breaks at **2.7 A**, so **power is ruled out by
+measurement**, and APA106 carries brightness in its own word, so the colour bytes
+never change with brightness — which is why a white brightness ladder from 1.9 A
+to 18.4 A was clean at every step. The margin that decides the fault is the data
+line: 3.3 V into beads that want `VIH >= 0.7 x VDD` = 3.5 V, on a ground
+reference the host sets. An earthed desktop spends none of that margin; a laptop
+on a two-pin brick spends all of it, which is why only the mac shows it and four
+cables changed nothing. Level-shift the data to 5 V (TXB0104 / SN74AHCT1G08 /
+2N7000 — what `firmware/README.md` prescribes for "intermittent colour errors"),
+bond PSU 0 V to ESP32 GND at one node, and isolate USB if the fault must stop
+following the host. Trim the PSU to 4.5 V to confirm the margin for free. A
+self-powered hub is not a test: it drops the host's 5 V and leaves the ground
+continuous, and measured here it changed nothing. Full write-up, including the
+~49 fps ceiling from the APA106 refresh and the rig's `torn=` counter, in
+`firmware/README.md`.
 
 ## Show-machine quick start
 
