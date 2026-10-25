@@ -590,6 +590,8 @@ test('the browser lookup covers where each platform keeps Chromium today', () =>
     'older Playwright builds unpack to chrome-mac');
   assert.ok(chromeInstalls('darwin').some((p) => p.startsWith('/Applications/Google Chrome.app/')),
     'a system Chrome on macOS must be findable');
+  assert.ok(chromeInstalls('darwin').some((p) => p.includes('Helium.app')),
+    'Helium is the Chromium on the Macs in this project, and the packaged app has no Playwright cache to fall back on');
 
   // The platforms that already worked keep the paths they always had.
   assert.equal(

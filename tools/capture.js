@@ -123,6 +123,13 @@ export function chromeInstalls(platform = process.platform) {
     return [
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
       '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+      // Helium is a Chromium browser, and it is the Chromium installed on the
+      // Macs in this project. It is in this list for a reason bigger than
+      // convenience: the PACKAGED app on a show Mac has no node_modules and no
+      // Playwright cache, so a system browser is the only route to --page and
+      // the /capture route there. Every entry in this list is one more show Mac
+      // on which page mode works out of the box.
+      '/Applications/Helium.app/Contents/MacOS/Helium',
       '/Applications/Chromium.app/Contents/MacOS/Chromium',
       '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
       '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
