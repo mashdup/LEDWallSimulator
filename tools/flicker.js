@@ -155,13 +155,20 @@ function report() {
   }
   const now = Date.now();
   const d = (k) => counters[k] - base[k];
-  const loss = d('disc') + d('resync') + d('rewind') + d('gaps') + (counters.torn === null ? 0 : d('torn'));
+  // `gaps` is NOT a wire fault. The rig counts a status window in which frames
+  // arrived and NO meta frame did (usermod.cpp noteGap(): statusFrames > 0 &&
+  // !statusMetaSeen), so a sender that sends frames and no metas ticks it once a
+  // second by construction. The wire counters are disc/resync/rewind (+ torn on a
+  // build that has it), and decoded==written is the clean statement.
+  const loss = d('disc') + d('resync') + d('rewind') + (counters.torn === null ? 0 : d('torn'));
   const sent = written - base.written;
   const torn = counters.torn === null ? '' : ` torn=+${d('torn')}`;
+  const flag = loss > 0 ? '   <-- bytes not landing (disc/resync/rewind)'
+    : d('gaps') > 0 ? '   frames landing; sender sent no meta that second (gaps is metadata, not the wire)'
+      : '   clean';
   console.log(
     `  sent ${sent}/s  board decoded ${d('frames')}/s  disc=+${d('disc')} resync=+${d('resync')}` +
-    ` rewind=+${d('rewind')} gaps=+${d('gaps')}${torn}` +
-    (loss > 0 ? '   <-- bytes/frames not landing' : '   clean'),
+    ` rewind=+${d('rewind')} gaps=+${d('gaps')}${torn}` + flag,
   );
   base = { ...counters, t: now, written };
 }
@@ -225,7 +232,8 @@ port.on('open', async () => {
     ` resync=${counters.resync} rewind=${counters.rewind} gaps=${counters.gaps}` +
     (counters.torn === null ? ' torn=(this build has no such field)' : ` torn=${counters.torn}`),
   );
-  console.log('flicker: note that gaps ticks +1 per run because this tool starts a new sequence.');
+  console.log('flicker: gaps counts status windows with frames and no meta, so it ticks +1 per run (and '
+    + 'per second) for a sender that sends no metas. It is not a wire fault; disc/resync/rewind/torn are.');
   port.close(() => process.exit(0));
 });
 
