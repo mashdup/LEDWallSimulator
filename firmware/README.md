@@ -738,20 +738,54 @@ invisible, because a shifted zero is dark. So:
   ladder was clean at 1.9 A through 18.4 A.
 - **Content-dependence is the pattern, not the drawing:** red and blue (16 zeros)
   break, white and grey do not, positions sit at fixed beads, and the affected set
-  moves as the content's bytes change. A 3 us margin against a reset window is
-  exactly the margin a host's ground offset and a data line 0.2 V short of `VIH`
-  can eat — which is why the same wall is steady on an earthed desktop and breaks
-  on the mac, and why four cables changed nothing.
+  moves as the content's bytes change.
 
-So the fix is the margin, in this order:
+**Why only the mac: the mac's serial driver. Measured, and it is the fix.** macOS
+claims the ESP32-S3's USB-CDC with the generic `AppleUSBACMData`; Windows uses WCH's
+vendor driver. Installing WCH's driver on the mac removes the seams completely — same
+bytes, same firmware, same beads, same power, same host, only the driver changed. See
+the repo README's "Serial on macOS" for the install, and note the board must be
+**attached at boot** for the DriverKit extension to claim the interface.
+
+That is why the electrical story below is **not** the cause, and it is worth being
+precise about what the measurements above actually prove. They prove the fault is
+**content-dependent and byte-aligned**, and they rule out power, brightness, the
+frame rate, the arrival pattern, the firmware, the app, the cable, the beads and the
+ground bond. They do **not** show a spec deficit being spent: a `VIH` shortfall is a
+property of the wall and would fail on every host, and the mac's ground offset was
+never measured. The level shift and the ground bond remain **good practice and
+immunity**, not the diagnosis — the diagnosis is the driver.
+
+**What the arrival pattern does show, and it is a real effect.** 30 fps flat red,
+`bri 255 lim 8000`, one phase per 20 s run, bytes held identical:
+
+| phase | sent | board decoded | disc / resync | the wall |
+|---|---|---|---|---|
+| spaced (what the app does) | 601 | +601 | 0 / 0 | seams at a fixed place |
+| **bursts of 3** | 594 | +594 | 0 / 0 | **way more flickers** |
+| spaced again | 600 | +600 | 0 / 0 | as before |
+
+Bursts made the *visible* fault worse while every counter stayed clean, so the beads
+are sensitive to how the host services the endpoint — which is exactly the axis the
+driver sits on, and why a driver change fixes it while nothing in this firmware does.
+The seams sit at fixed beads (70-78, 136-147, 180-191 of 400) because the host's
+service pattern is phase-locked to the frame, not because a particular bead is faulty.
+
+So the margin cures, in this order — good practice, and none of these proven causal
+on this wall now that the driver is known to be:
 
 1. **Level-shift the data to 5 V** — the Wiring section above prescribes exactly
    this for "intermittent colour errors": a TXB0104, SN74AHCT1G08 or a 2N7000
-   low-side stage. `VIH >= 0.7 x VDD` = 3.5 V at 5 V; a bare GPIO is 3.3 V, and
-   0.2 V of spec deficit is the whole budget here. ~300 ohms in series at the
-   first bead damps the ringing that starts a false reset on a long low.
-2. **Bond the panel PSU's 0 V to the ESP32's GND at ONE node** — the first hard
-   requirement above; a floating reference spends the same margin.
+   low-side stage. `VIH >= 0.7 x VDD` = 3.5 V at 5 V against a bare GPIO's 3.3 V, and
+   the vendor guide quotes the manufacturer's *70% of VDD* rule and prescribes a
+   74AHCT125 / 74HCT245. Treat it as immunity, not as an explanation of a mac-only
+   fault: it cannot be what differs between two hosts running the same bytes on the
+   same beads. Put **300-500 ohms in series at the pixel end, not the MCU end** (the
+   vendor guide is explicit about the end), and a **100 nF from DATA to GND at the
+   first bead**, which rounds the falling edge that a long low run depends on.
+2. **Bond the panel PSU's 0 V to the ESP32's GND at ONE node** — **done on this rig**
+   (ESP32 GND = PSU 0 V = LED GND), so it is checked off, not a to-do. A floating
+   reference would spend the same margin, which is why the requirement is listed.
 3. **A USB isolator (ADuM3160 module)** if the fault must stop following the host:
    it passes the data and breaks the ground path entirely, which is the difference
    between the desktop and the laptop. A **self-powered hub is not that test** —
@@ -795,9 +829,21 @@ reaps it, in which case the window is ~20 ms wide and a bursting host (USB-CDC
 delivers a whole frame at once, where a 921600 UART paces one per ~13 ms) lands
 inside it. `commitFrame()` checks `strip.IsUpdating()` and skips the paint, so the
 newest frame lands one refresh late rather than partly — one comparison either way.
-Read it as a measurement: `torn` climbing says the host is bursting and the path is
-real; `torn=0` with a flicker on a flat field says the fault is electrical and no
-firmware change will move it.
+Read it as a measurement: `torn` climbing says paints are landing inside a refresh and
+the guard is firing. The pacing A/B above is the prediction to test against it: flash
+the guard, re-run the burst phase, and if the burst-phase flicker collapses while
+`torn` climbs, the seam was a mid-flight restart and the fix is in the sketch. `torn=0`
+with the burst-phase flicker intact says the restart path is not it, and leaves the
+wire — and says so with a measurement, not an inference.
+
+One counter is a trap, and it caught a claim of mine. **`gaps` is not a wire fault:**
+the rig counts a status window in which frames arrived and NO meta frame did
+(`noteGap()`: `statusFrames > 0 && !statusMetaSeen`), so a sender that sends frames and
+no metas ticks it once per second by construction. `tools/flicker.js` added it into its
+loss total and printed "bytes/frames not landing"; on that reading I claimed the arrival
+pattern stressed the wire at 42 fps, and the claim is withdrawn (fixed in the tool). The
+wire counters are `disc`, `resync`, `rewind`, and `torn` on a build that prints it, and
+`decoded == written` is the clean statement.
 
 ---
 

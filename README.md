@@ -127,13 +127,44 @@ Serial on Linux: the ESP32's wch UART appears as `/dev/ttyUSB0` (kernel
 `ch341` driver, stock). The browser stack needs device permission:
 `sudo usermod -aG dialout $USER` (re-login once). That is the whole setup.
 
-Serial on macOS: the same cable is `/dev/cu.usbmodem<serial>` (Apple's CDC
-driver; `cu.wchusbserial*` if WCH's own kext is installed). Nothing to
-install and no group to join. `npm run freeport -- /dev/cu.usbmodem…` names
-whoever holds it (lsof, so no probe-open and no ESP32 reset — the Windows
-probe's side effect). The app's pre-flight and takeover speak both OSes:
-`GET /serial` reports the `/dev` nodes and their state, `COM8` on a Mac is
-now a named complaint instead of silence.
+Serial on macOS: the same cable is `/dev/cu.usbmodem<serial>` under Apple's
+built-in CDC-ACM driver, or `/dev/cu.wchusbserial<serial>` under WCH's own
+driver. **Install WCH's driver — the Apple one flickers the wall.** Nothing to
+install and no group to join for the *port* to work; see below for why you want
+the driver anyway. `npm run freeport -- /dev/cu.usbmodem…` names whoever holds
+it (lsof, so no probe-open and no ESP32 reset — the Windows probe's side
+effect). The app's pre-flight and takeover speak both OSes: `GET /serial`
+reports the `/dev` nodes and their state, `COM8` on a Mac is now a named
+complaint instead of silence. `tools/flicker.js` auto-detects the port, so a
+driver swap needs no flag.
+
+**The mac driver decides whether this wall flickers. Measured, and the whole
+reason this file mentions it.** The ESP32-S3 presents USB-CDC, so macOS claims
+it with the generic `AppleUSBACMData` and the wall shows colour seams at fixed
+beads (70-78, 136-147, 180-191 of 400) on a flat field — while **every** digital
+counter stays clean: `decoded == written`, `disc=0 resync=0`, at 8/15/30/30.5/
+31/32/33/42/45 fps, spaced and bursty, and with no intra-frame write gap over
+146 us. Installing WCH's driver (the one Windows uses) and rebooting with the
+board attached removes it completely. Same bytes, same firmware, same beads,
+same power, same host: **only the driver changed.**
+
+```sh
+./tools/mac-wch-driver.sh            # download + verify the vendor package (no install)
+./tools/mac-wch-driver.sh --install  # install (asks for your password)
+# approve it: System Settings -> General -> Login Items & Extensions -> Driver Extensions
+sudo reboot                          # WITH THE BOARD PLUGGED IN
+./tools/mac-wch-driver.sh --check    # want cu.wchusbserial* and a running dext
+```
+
+The package is signed by *Nanjing Qinheng Microelectronics* and notarized by
+Apple, and its personalities claim `idVendor 6790` + `idProduct 21971` exactly.
+Two things that cost time here and are worth knowing: on macOS 26 the driver is
+a **DriverKit system extension**, not a kext, so `/Library/Extensions` and
+`kmutil` show nothing and are the wrong places to look — use
+`systemextensionsctl list`; and the dext only claims the interface at USB
+enumeration, so **the board must be attached at boot** or Apple's driver keeps
+it. A CDC-ACM device that Apple has already claimed will not be handed to the
+dext by a replug alone.
 
 Serial on macOS is also a **privacy** grant, and the part that bites: the
 first serial call asks TCC for Bluetooth, because a paired Bluetooth modem
@@ -184,35 +215,45 @@ reported "No serial port was selected" with the wall in front of it.
 Data & logs land in the per-OS userData (`~/.config/led-wall-simulator/`
 Linux, `~/Library/Application Support/led-wall-simulator/` macOS).
 
-**A wall that flickers on the mac and not on Windows is almost certainly not
-the mac's code.** Measured on this panel: the app's fixed 30 fps stream lands
-byte-perfect (`disc=0 resync=0`, decoded == written) and 45 fps does too, so the
-bytes are not the fault — and a FLAT FIELD, where the host sends the same 1200
-bytes every frame, still grew runs of green beads at fixed columns. Data that
-never changes cannot be mis-rasterised, desynced, torn or dropped, so that one
-test (`node tools/flicker.js --fill ff0000 --duration 45000`, app closed) moves
-the fault to the beads' side of the pin: a bead that misreads a bit count latches
-the wrong colour and shifts the run behind it, which is why it looks like a
-column. The colours then do the measuring: in BGR a red bead showing bright green
-is **one byte late**, and a blue bead showing red is **two bytes late** — beads
-drop whole bytes, and the run travels downstream. What drops them is the **low
-run**: at a 1.7 µs bit, red and blue carry 16 consecutive zeros (**27.2 µs**)
-against a latch-reset window in the ~30 µs region for these beads, while white
-(24 ones, no low run at all) is steady at 8 A *and* at 18.4 A and grey `#555555`
-(1.7 µs) is steady at 8 A. Red breaks at **2.7 A**, so **power is ruled out by
-measurement**, and APA106 carries brightness in its own word, so the colour bytes
-never change with brightness — which is why a white brightness ladder from 1.9 A
-to 18.4 A was clean at every step. The margin that decides the fault is the data
-line: 3.3 V into beads that want `VIH >= 0.7 x VDD` = 3.5 V, on a ground
-reference the host sets. An earthed desktop spends none of that margin; a laptop
-on a two-pin brick spends all of it, which is why only the mac shows it and four
-cables changed nothing. Level-shift the data to 5 V (TXB0104 / SN74AHCT1G08 /
-2N7000 — what `firmware/README.md` prescribes for "intermittent colour errors"),
-bond PSU 0 V to ESP32 GND at one node, and isolate USB if the fault must stop
-following the host. Trim the PSU to 4.5 V to confirm the margin for free. A
-self-powered hub is not a test: it drops the host's 5 V and leaves the ground
-continuous, and measured here it changed nothing. Full write-up, including the
-~49 fps ceiling from the APA106 refresh and the rig's `torn=` counter, in
+**A wall that flickers on the mac and not on Windows is the mac's serial
+driver.** Measured, and it is the one mac-specific cause this wall has. The
+symptom: runs of beads in colours nobody sent, at **fixed** beads (70-78,
+136-147, 180-191 of 400), on a flat field, only on the mac. The cause: macOS
+claims the ESP32-S3's USB-CDC with the generic `AppleUSBACMData`, where Windows
+uses WCH's vendor driver. Installing WCH's driver removes it completely — see
+"Serial on macOS" above for the install, and note the board must be **attached
+at boot** for the DriverKit extension to claim the interface.
+
+What made this expensive to find is that **every digital counter is clean on
+both drivers.** On the Apple driver, with the seams plainly visible on the wall:
+`decoded == written`, `disc=0 resync=0`, at 8/15/30/30.5/31/32/33/42/45 fps,
+spaced and bursty; the host's own writes had no intra-frame gap over 146 us; the
+wall was steady with the serial port closed (the board driving itself) and steady
+on Windows with the same firmware. So these are all ruled out **by measurement**,
+not by argument:
+
+- **the bytes** — a flat field sends the same 1200 bytes every frame and still
+  shifted, and the board's parser reported every frame intact
+- **the frame rate** — identical seams at every rate from 8 to 45 fps
+- **the arrival pattern** — bursts of 3 changed how *bad* it looked and nothing
+  in the counters; pacing alone is not the cause
+- **power and brightness** — flat white was steady at 8 A *and* 18.4 A; red broke
+  at 2.7 A, so a sag cannot be it (it would worsen as load *rose*). APA106
+  carries brightness in its own word, so the colour bytes never change with it
+- **the firmware** — the same build is clean on Windows
+- **the app** — `tools/flicker.js`, which is not the app, reproduces it
+- **the cable, the beads, the PSU, the ground bond** — unchanged across the fix
+
+Only the driver changed. The board's counters stay clean on both drivers because
+Apple's driver does deliver every byte correctly at the UART level; the
+difference is in how it services the endpoint, and the beads are sensitive to the
+resulting gaps in the RMT feed. That is why nothing digital could see it, and why
+the fix is a driver install rather than anything in this repo.
+
+`node tools/flicker.js --fill 0000ff --fps 30 --bri 255 --limit 8000 --duration 45000`
+is the check, with the app closed. The port auto-detects, so the driver swap
+needs no flag. The ~49 fps ceiling from the APA106 refresh (400 beads x 30 bits
+at a 1.7 us bit is ~20 ms of wire) and the rig's `torn=` counter are in
 `firmware/README.md`.
 
 ## Show-machine quick start

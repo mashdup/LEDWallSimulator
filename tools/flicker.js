@@ -32,6 +32,7 @@
 //   node tools/flicker.js --fps 42 --pace burst --burst 3       # burst vs paced
 //   node tools/flicker.js --pattern checker --duration 25000 \
 //        --sweep 40:8000,85:8000,140:20000,195:40000,255:80000
+import { readdirSync } from 'node:fs';
 import { frame, meta, nextSeq, LED_COUNT, RGB_BYTES } from '../core/frame.js';
 
 const USAGE = `flicker probe — controlled arrival rate + the board's counters, same second
@@ -60,7 +61,36 @@ if (argv.includes('--help') || argv.includes('-h')) {
   process.exit(0);
 }
 
-const PORT = arg('port', process.env.WALL_PORT || '/dev/cu.usbmodem59810005071');
+/*
+ * Which port? In order: --port, $WALL_PORT, then the first USB serial device we
+ * can find on this platform.
+ *
+ * The default used to be the literal '/dev/cu.usbmodem59810005071', which is this
+ * board's name under Apple's built-in CDC-ACM driver. Installing WCH's own driver
+ * renames the same device (cu.wchusbserial*), and a hardcoded path turns that into
+ * "port not found" - which reads as a broken driver instead of a renamed port. So
+ * resolve it, and print what was resolved.
+ */
+function defaultPort() {
+  const candidates = [];
+  try {
+    for (const name of readdirSync('/dev')) {
+      // cu.* is the callout device (what you open); tty.* is the dial-in twin.
+      if (/^cu\.(usbmodem|usbserial|wchusbserial|SLAB_USBtoUART|usb)/.test(name)) {
+        candidates.push(`/dev/${name}`);
+      }
+    }
+  } catch { /* not POSIX, or /dev unreadable */ }
+  if (candidates.length) {
+    // Prefer the WCH names, then usbmodem, so the choice is stable across driver swaps.
+    const rank = (p) => (/wchusbserial/.test(p) ? 0 : /usbmodem/.test(p) ? 1 : 2);
+    candidates.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+    return candidates[0];
+  }
+  return process.platform === 'win32' ? 'COM8' : '/dev/cu.usbmodem59810005071';
+}
+
+const PORT = arg('port', process.env.WALL_PORT || defaultPort());
 const FPS = Math.max(1, Math.min(200, Number(arg('fps', 30)) || 30));
 const DURATION = Math.max(500, Number(arg('duration', 12000)) || 12000);
 const PACE = arg('pace', 'spaced') === 'burst' ? 'burst' : 'spaced';
@@ -109,14 +139,35 @@ function checker(t) {
   return rgb;
 }
 
-/** A flat field: the same 1200 bytes every frame. See --fill in the header. */
+/**
+ * A flat field: the same 1200 bytes every frame. See --fill in the header.
+ *
+ * --fill takes the colour as rrggbb (what a person reads off a colour picker), and
+ * this wall's wire order is BGR (see the panel notes), so the bytes go out B,G,R.
+ * That conversion is the whole point of this function: writing [r,g,b] straight
+ * through put 00 00 FF on the wire for "--fill 0000ff", which is RED on a BGR
+ * panel, so a run labelled "flat blue" was a red field and the label lied. The
+ * tool now prints the wire bytes and the colour they make on THIS panel.
+ */
 function flat() {
   const rgb = new Uint8Array(RGB_BYTES);
   const r = parseInt(FILL.slice(0, 2), 16);
   const g = parseInt(FILL.slice(2, 4), 16);
   const b = parseInt(FILL.slice(4, 6), 16);
-  for (let i = 0; i < LED_COUNT; i++) rgb.set([r, g, b], i * 3);
+  for (let i = 0; i < LED_COUNT; i++) rgb.set([b, g, r], i * 3); // BGR wire order
   return rgb;
+}
+
+/** What the first bead's bytes will actually show on a BGR panel. */
+function fillLabel() {
+  if (!FILL) return null;
+  const r = parseInt(FILL.slice(0, 2), 16);
+  const g = parseInt(FILL.slice(2, 4), 16);
+  const b = parseInt(FILL.slice(4, 6), 16);
+  const hex = (n) => n.toString(16).padStart(2, '0');
+  const name = (v) => (v > 0x80 ? 'bright' : v > 0 ? 'dim' : null);
+  const parts = [name(r) && 'red', name(g) && 'green', name(b) && 'blue'].filter(Boolean);
+  return `fill ${FILL} -> wire BGR ${hex(b)} ${hex(g)} ${hex(r)} -> ${parts.join('+') || 'black'}`;
 }
 
 const draw = FILL ? flat : PATTERN === 'checker' ? checker : sweep;
@@ -194,6 +245,7 @@ port.on('open', async () => {
     `flicker: ${PORT} @921600  ${FPS} fps  ${FILL ? `FLAT FIELD #${FILL}` : `pattern=${PATTERN}`}` +
     `  pace=${PACE}${PACE === 'burst' ? ` x${BURST}` : ''}  bri=${BRI} lim=${LIMIT}  ${DURATION} ms`,
   );
+  if (FILL) console.log(`flicker: ${fillLabel()}`);
   if (FPS > 45) console.log('flicker: above the strip ceiling (~49 fps for 400 APA106) — expect the stream to collapse');
   if (STEPS.length) console.log(`flicker: brightness steps -> ${STEPS.map((s) => `bri=${s.bri} lim=${s.lim}`).join('  |  ')}`);
   console.log('flicker: watch the wall; a flicker that survives a FLAT FIELD is electrical, not data\n');
