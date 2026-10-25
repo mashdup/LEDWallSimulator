@@ -48,6 +48,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { findChrome } from './capture.js';
+import { ensureDevSerialPlist } from './mac-dev-serial.js';
 import { freePort, isFetchablePort } from './ports.js';
 
 const SERVE_SCRIPT = fileURLToPath(new URL('./serve.js', import.meta.url));
@@ -181,6 +182,18 @@ function openElectronWindow(extra, debug = false) {
   if (probe.status !== 0 || !bin) {
     console.log('start: electron is not installed (npm i -D electron) - falling back to the Chrome app window.');
     return null;
+  }
+  // macOS: Electron's prebuilt helper apps carry no NSBluetoothAlwaysUsage-
+  // Description, and the serial stack's first enumeration asks TCC for
+  // Bluetooth (a paired Bluetooth modem is a serial port there). Denied
+  // without a usage description, TCC ABORTS the app - mid-serial, after
+  // 'window loaded', so the venue log never mentions serial and it reads
+  // like a hung port picker. Patch the dev bundle's plists once per
+  // `npm ci` (idempotent; only re-signs when it changed something).
+  if (process.platform === 'darwin') {
+    const patched = ensureDevSerialPlist();
+    if (patched.patched) console.log(`start: declared serial/Bluetooth usage on the dev Electron.app${patched.signed ? ' and re-signed it ad-hoc' : ''}`);
+    if (!patched.ok) console.log(`start: the dev Electron.app is not serial-ready: ${patched.error}`);
   }
   const main = fileURLToPath(new URL('./electron/main.cjs', import.meta.url));
   // NO windowsHide here: it sets STARTF_USESHOWWINDOW/SW_HIDE on the

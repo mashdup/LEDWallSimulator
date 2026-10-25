@@ -31,6 +31,11 @@
  *   --relay-key <hex>   pairing key for that relay
  *   --relay-interval ms sync period (serve.js default 5000)
  *   --kiosk             fullscreen, always-on-top (the show machine)
+ *   --wall-serial <s>   port preference for the picker: a name substring
+ *                       ('usbmodem', 'COM8') or 'vid:pid' ('1a86:7523').
+ *                       Default: pick it from the list by signature — the
+ *                       same cable is COM8/wch on Windows and
+ *                       cu.usbmodem…/6790 on macOS (see serial-pick.cjs)
  *   --wall-debug        DevTools + CDP on 127.0.0.1:9223 for the renderer
  *                       (named so it cannot be mistaken for node's legacy
  *                       --debug: electron's CLI scans every argument for
@@ -43,6 +48,7 @@ const { app, BrowserWindow, session, Menu, screen } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
+const { pickSerialPort, describePort } = require('./serial-pick.cjs');
 
 const argv = process.argv.slice(1); // app args (everything after main.cjs)
 const has = (f) => argv.includes(f);
@@ -52,6 +58,7 @@ const flagValue = (f) => {
 };
 const externalUrl = argv.find((a) => /^https?:\/\//.test(a)) ?? null;
 const PORT = Number(flagValue('--port') ?? 8080);
+const WALL_SERIAL = flagValue('--wall-serial');
 const SERVE_SCRIPT = path.join(__dirname, '..', 'serve.js');
 
 // The measured 1.1 GB GPU-process grey page: painting is software, by
@@ -230,8 +237,30 @@ if (!app.requestSingleInstanceLock()) {
         // the load event: at did-finish-load the entry points are not defined
         // yet (measured: 'no-page'). Poll for the page to be booted.
         let state = null;
+        // executeJavaScript AWAITS the page's promise, and wallAutoStart()
+        // awaits navigator.serial.getPorts(). The first serial call in a
+        // renderer starts Chromium's serial utility process; when that
+        // process cannot start (unsigned dev build, a machine with no serial
+        // stack) the promise NEVER settles - and the shell sat here with an
+        // empty log, which is how 'the app boots, the wall is dark, the log
+        // says nothing about serial' shows up. Every poll gets a deadline,
+        // and a stall is a LOGGED state, not a hang.
+        const EVAL_TIMEOUT_MS = 4000;
+        const poll = () => {
+          const evalP = wc.executeJavaScript('window.wallAutoStart ? window.wallAutoStart() : null');
+          // A late settlement of a timed-out eval must not warn the process.
+          evalP.catch(() => {});
+          return Promise.race([
+            evalP,
+            new Promise((done) => setTimeout(() => done('stalled'), EVAL_TIMEOUT_MS)),
+          ]);
+        };
         for (let i = 0; i < 40 && state === null; i++) {
-          state = await wc.executeJavaScript('window.wallAutoStart ? window.wallAutoStart() : null');
+          state = await poll();
+          if (state === 'stalled') {
+            log(`electron: serial autostart: wallAutoStart() did not settle in ${EVAL_TIMEOUT_MS} ms (attempt ${i + 1}/40) - navigator.serial is wedged on this machine`);
+            return;
+          }
           if (state === null) await new Promise((r) => setTimeout(r, 250));
         }
         if (state === null) {
@@ -249,9 +278,20 @@ if (!app.requestSingleInstanceLock()) {
           const key = (type) => ({ type, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65 });
           await wc.debugger.sendCommand('Input.dispatchKeyEvent', key('keyDown'));
           await wc.debugger.sendCommand('Input.dispatchKeyEvent', key('keyUp'));
-          const done = await wc.executeJavaScript(
-            'window.wallSerialConnect ? window.wallSerialConnect().then(() => "connected", (e) => "error: " + (e && e.message ? e.message : String(e))) : "no-page"',
+          // Report the OUTCOME, not the resolution: connect() swallows its
+          // errors into the sink line, so a promise that resolved used to log
+          // 'gesture -> connected' over a refused picker (measured on the mac:
+          // 'refused' and 'connected' in the same second).
+          const connectP = wc.executeJavaScript(
+            'window.wallSerialConnect ? window.wallSerialConnect().then((r) => (r && r.ok === false) ? "FAILED: " + (r.error || "see the sink line") : "connected", (e) => "error: " + (e && e.message ? e.message : String(e))) : "no-page"',
           );
+          connectP.catch(() => {}); // a late settle after the deadline is not our business
+          // port.open() on a CDC-ACM node can block; an unevaluated promise
+          // here would pin the debugger open and leave the venue log silent.
+          const done = await Promise.race([
+            connectP,
+            new Promise((r) => setTimeout(() => r('stalled: port.open() never returned (15 s)'), 15000)),
+          ]);
           log(`electron: serial autostart: gesture -> ${done}`);
         } catch (err) {
           log(`electron: serial autostart failed: ${err?.message ?? err}`);
@@ -295,31 +335,17 @@ if (!app.requestSingleInstanceLock()) {
     ses.setPermissionRequestHandler((_wc, permission, cb) => {
       cb(permission === 'serial');
     });
+    // The picker is answered programmatically: a kiosk wall has no human at a
+    // dialog. The MATCH lives in serial-pick.cjs (unit-tested) because the
+    // Windows-shaped version of it refused the wall on macOS while the port
+    // was sitting in the list — see that file's header for the log excerpt.
     ses.on('select-serial-port', (event, portList, _wc, callback) => {
       const ports = Array.from(portList);
-      // Electron's SerialPortInfo fields came back undefined in the field
-      // (log showed 'undefined[?]' x3 while the OS clearly had COM8), so the
-      // raw objects are dumped once per request and matched defensively:
-      // any string-typed field that smells like the wch UART wins.
-      const describe = (p) => {
-        const s = JSON.stringify(p) ?? String(p);
-        return s.length > 200 ? `${s.slice(0, 200)}...` : s;
-      };
-      const fields = (p) => `${p.portName ?? ''} ${p.displayName ?? ''} ${p.deviceInstanceId ?? ''}`;
-      const isWall = (p) =>
-        /wch|ch34|usb.?serial/i.test(fields(p)) ||
-        String(p.vendorId ?? '').toLowerCase() === '1a86' ||
-        String(p.productId ?? '').toLowerCase() === '7523' ||
-        /vid_1a86/i.test(p.deviceInstanceId ?? '') ||
-        /com8\b/i.test(fields(p));
-      const chosen =
-        ports.find(isWall) ??
-        ports.find((p) => /^com\d+$/i.test(String(p.portName ?? ''))) ??
-        null;
+      const { port: chosen, why } = pickSerialPort(ports, { prefer: WALL_SERIAL });
       log(
         `electron: serial request - ${ports.length} port(s): ` +
-        ports.map(describe).join(' | ') +
-        (chosen ? ` -> choosing ${describe(chosen)}` : ' -> none chosen (refused)'),
+        ports.map(describePort).join(' | ') +
+        (chosen ? ` -> choosing ${describePort(chosen)} [${why}]` : ` -> none chosen: ${why}`),
       );
       callback(chosen ? chosen.portId : '');
       event.preventDefault();

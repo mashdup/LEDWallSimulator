@@ -90,9 +90,12 @@ let sourceMode = 'text';
 let renderer = null;
 let sink = null;
 // Best-known path of the wall's port. A failed open cannot ask the port for
-// its info (there is no port), so the takeover needs the last good path -
-// and COM8 is this wall's shipped port.
-let lastSerialPort = 'COM8';
+// its info (there is no port), so the takeover needs the last good path. It
+// is NOT hardcoded to COM8: that is the show machine's Windows name, and the
+// same cable on a Mac is 'cu.usbmodem59810005071'. The seed comes from the
+// server's port list (serialPreflight); Connect overwrites it with the path
+// it actually opened.
+let lastSerialPort = null;
 
 /**
  * Connect found the port busy: a corpse of a previous app instance is
@@ -104,6 +107,7 @@ let lastSerialPort = 'COM8';
  * Returns true when a corpse was cleared, so Connect retries the open.
  */
 async function serialTakeOver() {
+  if (lastSerialPort === null) return false; // nothing was ever named; nothing to free
   try {
     const r = await fetch('/serial/takeover', {
       method: 'POST',
@@ -518,7 +522,7 @@ function report(k, ma) {
 
 async function connect() {
   const kind = $('sink').value;
-  if (!SINK_KINDS.includes(kind)) return;
+  if (!SINK_KINDS.includes(kind)) return { ok: false, error: `unknown sink kind '${kind}'` };
   // The click that connects the wall is also the gesture that lets a silent
   // audio stream start: Chrome throttles a hidden tab's timers AND its
   // workers to ~1 Hz, and the audio exemption is the only in-page escape.
@@ -548,6 +552,9 @@ async function connect() {
     setOutput($('sinkOut'), `connected: ${sink.kind}${whom ? ` - ${whom}` : ''}`, 'ok');
     $('connect').disabled = true;
     $('disconnect').disabled = false;
+    // The app shell logs this outcome (its 'autostart: gesture -> ...' line
+    // used to say 'connected' over a refused picker, because connect()
+    // resolves either way and the shell had nothing to read).
   } catch (err) {
     sink = null;
     // A serial open failure is almost always 'port busy', and the usual
@@ -570,7 +577,7 @@ async function connect() {
               setOutput($('sinkOut'), e2.message, 'err');
               $('connect').disabled = false;
               $('disconnect').disabled = true;
-              return;
+              return { ok: false, error: e2.message };
             }
             await new Promise((r) => setTimeout(r, 600));
           }
@@ -582,12 +589,13 @@ async function connect() {
         setOutput($('sinkOut'), `connected: ${sink.kind} - ${lastSerialPort} (took over from the previous instance)`, 'ok');
         $('connect').disabled = true;
         $('disconnect').disabled = false;
-        return;
+        return { ok: true, port: lastSerialPort };
       }
     }
     setOutput($('sinkOut'), err.message, 'err');
     $('connect').disabled = false;
     $('disconnect').disabled = true;
+    return { ok: false, error: err.message };
   }
 }
 
@@ -1207,7 +1215,13 @@ async function serialPreflight() {
     const res = await fetch('/serial');
     if (!res.ok) return;
     const ports = await res.json();
-    const busy = ports.filter((p) => p.state === 'busy').map((p) => p.port);
+    // Seed the takeover target: on a Mac the port is 'cu.usbmodem…', never
+    // COM8, so a hardcoded seed asks the server to free a port that does not
+    // exist. The first real port the server reports is the best guess.
+    if (lastSerialPort === null && Array.isArray(ports) && ports.length > 0) {
+      lastSerialPort = ports[0].port;
+    }
+    const busy = ports.filter((p) => p.state === 'busy' || p.state === 'BUSY').map((p) => p.port);
     if (busy.length > 0 && sink === null) {
       setOutput($('sinkOut'), `warning: ${busy.join(', ')} in use by another program - close its serial monitor before connecting`, 'warn');
     }

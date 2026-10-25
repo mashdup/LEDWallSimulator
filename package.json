@@ -83,7 +83,12 @@
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "tools/electron/entitlements.mac.plist",
-      "entitlementsInherit": "tools/electron/entitlements.mac.plist"
+      "entitlementsInherit": "tools/electron/entitlements.mac.plist",
+      "afterPack": "tools/electron/afterPack.cjs",
+      "extendInfo": {
+        "NSBluetoothAlwaysUsageDescription": "The LED wall lists serial devices, and macOS includes Bluetooth serial ports in that list.",
+        "NSBluetoothPeripheralUsageDescription": "The LED wall lists serial devices, and macOS includes Bluetooth serial ports in that list."
+      }
     },
     "linux": {
       "target": [

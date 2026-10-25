@@ -13,7 +13,8 @@
 // whatever the host sends next, and the watchdog is disabled), but it is why
 // the probe is cached and lazy, not hammered.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 
 // Enumerate, then test-open each port. 'FREE' = we opened and closed it;
 // anything else (busy, access denied, gone) = 'BUSY'.
@@ -38,6 +39,59 @@ export function parseProbeOutput(text) {
   return out;
 }
 
+// ---- the POSIX half (macOS / Linux) ---------------------------------------
+//
+// The Windows probe test-opens every port, which is the only way to learn
+// 'busy' there, and it reboots the ESP32 while at it. On a Mac that is both
+// unnecessary and rude: `lsof` names the process holding a /dev/cu.* node,
+// so the probe has no side effects at all. Enumeration mirrors what Chromium
+// lists, because a port the app cannot open is not worth warning about:
+// macOS exposes USB-UARTs as cu.usbmodem*/cu.usbserial*/cu.wchusbserial*, and
+// lists two things that are never a cable (cu.Bluetooth-*, cu.debug-console);
+// Linux uses ttyACM*/ttyUSB*.
+
+const POSIX_NOISE = /bluetooth|debug-console|pda-sync|wlan|irda/i;
+
+/** Real serial devices in /dev, as Chromium's Web Serial would list them. */
+export function posixPortNames(platform = process.platform) {
+  let names;
+  try {
+    names = readdirSync('/dev');
+  } catch {
+    return [];
+  }
+  const keep =
+    platform === 'darwin'
+      ? (n) => /^cu\./.test(n) && !POSIX_NOISE.test(n)
+      : (n) => /^tty(ACM\d+|USB\d+|CH34\d|wchusbserial|ACM)/.test(n) || /^ttyUSB\d+$/.test(n);
+  return names.filter(keep).sort();
+}
+
+/**
+ * Which of these /dev nodes some process already has open. One lsof call for
+ * the whole list; `+c 0` so long app paths ('/Applications/LED Wall.app/…')
+ * are not truncated to lsof's 19-char default and lose the identity the
+ * takeover's kill-list depends on. No lsof (bare container): report NOTHING
+ * busy — a warning we cannot back up is worse than no warning.
+ */
+export function posixBusyNames(names, run = spawnSync) {
+  if (names.length === 0) return new Set();
+  const devices = names.map((n) => `/dev/${n}`);
+  const r = run('lsof', ['-n', '-P', '+c', '0', '-F', 'pcn', '--', ...devices], {
+    encoding: 'utf8',
+    timeout: 8000,
+  });
+  if (r === undefined || r.error) return new Set();
+  const busy = new Set();
+  for (const line of String(r.stdout ?? '').split('\n')) {
+    if (!line.startsWith('n')) continue;
+    const name = line.slice(1).split(':')[0]; // 'n/dev/cu.usbmodemX' (locks append :lock)
+    const base = name.replace(/^\/dev\//, '');
+    if (names.includes(base)) busy.add(base);
+  }
+  return busy;
+}
+
 let cache = { at: 0, ports: [] };
 const CACHE_MS = 3000;
 // PowerShell cold start on a busy Windows machine measured > 5 s; a tight
@@ -56,6 +110,20 @@ const PROBE_TIMEOUT_MS = 15000;
 export async function serialPorts(opts = {}) {
   const timeoutMs = opts.timeoutMs ?? PROBE_TIMEOUT_MS;
   if (!opts.bypassCache && Date.now() - cache.at < CACHE_MS) return cache.ports;
+  // Non-Windows: enumerate /dev and ask lsof who holds what. The PowerShell
+  // probe below answers [] on a Mac (spawn fails), which made the app's
+  // pre-flight and its port-name seed dead on every non-Windows machine.
+  if (process.platform !== 'win32') {
+    const names = posixPortNames(process.platform);
+    const busy = posixBusyNames(names, opts.run ?? spawnSync);
+    const ports = names.map((n) => ({
+      port: n,
+      path: `/dev/${n}`,
+      state: busy.has(n) ? 'BUSY' : 'FREE',
+    }));
+    cache = { at: Date.now(), ports };
+    return ports;
+  }
   const ports = await new Promise((done) => {
     let settled = false;
     const finish = () => {
@@ -111,11 +179,31 @@ import { findHolders, killHolders } from './freeport-scan.js';
  */
 export function serialTakeOver(port, opts = {}) {
   void opts; // (killHolders spawns its own taskkill; no injectables needed)
-  const p = String(port ?? '').toUpperCase();
-  if (!/^COM\d{1,3}$/.test(p)) return Promise.resolve({ ok: false, error: `invalid port name '${port}'`, results: [] });
+  const p = String(port ?? '').trim();
+  if (process.platform === 'win32') {
+    if (!/^COM\d{1,3}$/i.test(p)) return Promise.resolve({ ok: false, error: `invalid port name '${port}'`, results: [] });
+    const found = findHolders(p);
+    if (!found.ok) return Promise.resolve({ ok: false, error: found.error, results: [] });
+    const killable = (name) => /^electron(\.exe)?$/i.test(name);
+    const results = killHolders(found.holders, killable);
+    return Promise.resolve({
+      ok: true,
+      error: null,
+      holders: found.holders,
+      results,
+      killed: results.filter((r) => r.killed).map((r) => r.pid),
+      spared: results.filter((r) => !r.killed).map((r) => ({ pid: r.pid, name: r.name, reason: r.reason })),
+    });
+  }
+  // macOS/Linux: the same rule, a different kill. On a Mac the holder of a
+  // Web Serial port is the app's own utility process ('Electron Helper' /
+  // 'LED Wall Helper'), so the auto-kill list is our binaries plus electron —
+  // and nothing else. A holder named 'arduino-ide' is reported and spared.
   const found = findHolders(p);
   if (!found.ok) return Promise.resolve({ ok: false, error: found.error, results: [] });
-  const killable = (name) => /^electron(\.exe)?$/i.test(name);
+  const killable = (name) =>
+    /(^|[\/])(electron|LED Wall|LED Wall Helper[^\/]*|led-wall\S*)$/i.test(String(name)) ||
+    /LED Wall\.app\/Contents/i.test(String(name));
   const results = killHolders(found.holders, killable);
   return Promise.resolve({
     ok: true,

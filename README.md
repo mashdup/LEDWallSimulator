@@ -19,6 +19,10 @@ npm run wall -- --relay https://wall.hoa.family --relay-key <hex>
                                     # one-shot relay pairing (the console dropdown
                                     # is the normal way; see "The relay" below)
 npm run wall -- --debug             # DevTools + CDP on 127.0.0.1:9223 (for probes)
+npm run wall -- --wall-serial usbmodem   # pin the port the picker answers with:
+                                    # a name substring ('usbmodem', 'COM8') or
+                                    # 'vid:pid' in either base ('1a86:7523',
+                                    # '6790:21971'). Default: pick by signature.
 npm run wall -- http(s)://...       # drive a published console instead of local
 ```
 
@@ -41,12 +45,21 @@ browser:
   is ours, not a browser's favor.
 - A Web Serial `requestPort()` **requires a user gesture**, so every reload
   of a browser console kills the wall until a human clicks Connect again. →
-  The app answers the port picker programmatically (the wch/COM8 device is
-  preferred by vendor id), reopens **granted** ports gesture-free via
-  `getPorts()` at boot, and when nothing is granted the shell **dispatches a
-  trusted synthetic key event through its own debugger** — a real input event
-  is what transient activation means, so the app can afford the one thing the
-  page must never fake.
+  The app answers the port picker programmatically, reopens **granted**
+  ports gesture-free via `getPorts()` at boot, and when nothing is granted
+  the shell **dispatches a trusted synthetic key event through its own
+  debugger** — a real input event is what transient activation means, so the
+  app can afford the one thing the page must never fake.
+- The same cable is a different string per OS, and a picker written from one
+  machine's log refuses the wall on the next. → `tools/electron/serial-pick.cjs`
+  matches by **signature, both id bases, and every name shape**: the wall is
+  `COM8` / `VID_1A86&PID_7523` / vendorId `'1a86'` on Windows and
+  `cu.usbmodem59810005071` / "USB Single Serial" / vendorId `'6790'` on
+  macOS — Chromium prints ids in **hex on Windows and decimal on macOS**
+  (6790 = 0x1a86), `deviceInstanceId` does not exist on macOS, and macOS
+  lists `cu.Bluetooth-Incoming-Port` + `cu.debug-console` as decoys, so
+  "take the first port" drives a dark wall. Tested on the field records
+  (`test/serial-pick.test.js`).
 - A bright frame can sag USB and the ESP32's port re-enumerates. → The sink
   closes the port on disconnect (no handle leaks — that leak was the grey
   page's root cause), arms on the device's own `connect` event, and the
@@ -114,6 +127,36 @@ Serial on Linux: the ESP32's wch UART appears as `/dev/ttyUSB0` (kernel
 `ch341` driver, stock). The browser stack needs device permission:
 `sudo usermod -aG dialout $USER` (re-login once). That is the whole setup.
 
+Serial on macOS: the same cable is `/dev/cu.usbmodem<serial>` (Apple's CDC
+driver; `cu.wchusbserial*` if WCH's own kext is installed). Nothing to
+install and no group to join. `npm run freeport -- /dev/cu.usbmodem…` names
+whoever holds it (lsof, so no probe-open and no ESP32 reset — the Windows
+probe's side effect). The app's pre-flight and takeover speak both OSes:
+`GET /serial` reports the `/dev` nodes and their state, `COM8` on a Mac is
+now a named complaint instead of silence.
+
+Serial on macOS is also a **privacy** grant, and the part that bites: the
+first serial call asks TCC for Bluetooth, because a paired Bluetooth modem
+*is* a serial port to macOS (`/dev/cu.Bluetooth-Incoming-Port` shows up in
+the list). Two measured consequences:
+
+- TCC reads the usage description from the bundle that **asks**, and the ask
+  comes from an Electron *Helper* app. Electron's helpers and electron-builder's
+  generated helpers ship without `NSBluetoothAlwaysUsageDescription`, so
+  anything that cannot be granted an answer dies with
+  `__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION` — mid-serial, right after
+  `window loaded`, which reads exactly like a hung port picker. The build
+  declares the key in the app and in every helper now (`build.mac.extendInfo`
+  plus `tools/electron/afterPack.cjs`); `tools/mac-dev-serial.js` patches the
+  dev `node_modules/electron` bundle the same way, from the launcher.
+- macOS charges the ask to the **responsible process**, and a process started
+  from a shell inherits the *terminal*. Measured: launching the app from this
+  terminal logged `tccd: Refusing authorization request for service
+  kTCCServiceBluetoothAlways and subject Sub:{dev.warp.Warp-Stable…}` and the
+  wall died. **Start the show from Finder/Launchpad, not a terminal**, and
+  accept the one-time Bluetooth prompt. A terminal launch works only if the
+  terminal itself holds Bluetooth permission.
+
 Electron needs a desktop session's libraries (gtk3, nss, gbm, asound —
 standard on any desktop distro; a bare server/WSL needs them via apt) and,
 on distros that block unprivileged user-SUID (24.04+), the
@@ -132,7 +175,11 @@ ships unsigned:
 Local build on any Mac without secrets: `npm ci --omit=optional && npm run dist:mac`.
 Unsigned builds open with right-click → Open (Gatekeeper); Web Serial uses
 the macOS TCC prompt once, the app's permission handler answers the picker
-from then on - the same self-healing story as Windows.
+from then on - the same self-healing story as Windows. The picker's port
+MATCH is the platform-aware one (see `tools/electron/serial-pick.cjs`): on
+the 0.11.6 dmg it listed the ESP32 and chose nothing, because its id
+compare and its `/^com\d+$/` fallback were Windows-shaped, so the console
+reported "No serial port was selected" with the wall in front of it.
 
 Data & logs land in the per-OS userData (`~/.config/led-wall-simulator/`
 Linux, `~/Library/Application Support/led-wall-simulator/` macOS).

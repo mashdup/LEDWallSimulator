@@ -11,6 +11,7 @@
 // device path: QueryDosDevice('COM8') -> '\Device\Serial0'.
 
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 const CS = String.raw`
 using System;
@@ -142,6 +143,115 @@ public class PortHolder {
 
 /** Find every process holding `comName` (e.g. 'COM8'). Never throws. */
 export function findHolders(comName) {
+  return process.platform === 'win32' ? findHoldersWindows(comName) : findHoldersPosix(comName);
+}
+
+/**
+ * The POSIX twin of the handle scan. A /dev node is named directly, so this
+ * is one lsof call instead of a handle-table walk — and it needs no elevation
+ * for the same-user case (a root-held port is invisible here, exactly as an
+ * Admin-held COM port is invisible to the Windows scan).
+ */
+function findHoldersPosix(name) {
+  const devices = posixDeviceCandidates(name);
+  if (devices.length === 0) {
+    return {
+      ok: false,
+      error:
+        `'${name}' is not a serial port on this machine. macOS names them /dev/cu.usbmodem… `
+        + '(cu.usbserial…, cu.wchusbserial…); Linux names them /dev/ttyACM0, /dev/ttyUSB0. '
+        + 'COMn is a Windows name.',
+      holders: [],
+    };
+  }
+  const r = spawnSync('lsof', ['-n', '-P', '+c', '0', '-F', 'pcn', '--', ...devices], { encoding: 'utf8', timeout: 20000 });
+  if (r.error) return { ok: false, error: `lsof unavailable: ${r.error.message}`, holders: [] };
+  const holders = [];
+  let pid = null;
+  let cmd = null;
+  for (const line of String(r.stdout ?? '').split('\n')) {
+    if (line.startsWith('p')) {
+      pid = Number(line.slice(1));
+      cmd = null; // a new process set: its command line follows on 'c'
+    } else if (line.startsWith('c')) {
+      cmd = line.slice(1);
+    } else if (line.startsWith('n') && pid) {
+      const dev = line.slice(1).split(':')[0];
+      if (devices.includes(dev)) holders.push({ pid, name: cmd ?? '?', device: dev });
+    }
+  }
+  return { ok: true, error: null, holders: dedupe(holders) };
+}
+
+/** Every /dev path a user could mean by `name` (accepts the bare suffix too). */
+export function posixDeviceCandidates(name) {
+  const s = String(name ?? '').trim();
+  if (s === '' || /\0/.test(s) || s.includes('..')) return [];
+  const tries = [];
+  if (s.startsWith('/dev/')) tries.push(s);
+  else {
+    tries.push(`/dev/${s}`, `/dev/cu.${s}`, `/dev/tty${s}`);
+  }
+  // A COMn on a POSIX box is a typo (a copied Windows command), not a path.
+  if (/^com\d+$/i.test(s)) return [];
+  return tries.filter((t) => { try { return existsSync(t); } catch { return false; } });
+}
+
+function dedupe(holders) {
+  const seen = new Set();
+  return holders.filter((h) => {
+    const k = `${h.pid}\u0000${h.device}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+/**
+ * Terminate holders, filtered by a killable(name) predicate. A Connect
+ * takeover must never kill arbitrary processes: the caller decides which
+ * names are fair game (our own Electron zombies), everything else is
+ * reported untouched. Never throws.
+ */
+export function killHolders(holders, killable = () => true) {
+  return process.platform === 'win32'
+    ? killHoldersWindows(holders, killable)
+    : killHoldersPosix(holders, killable);
+}
+
+function killHoldersPosix(holders, killable) {
+  const results = [];
+  for (const h of holders) {
+    if (!killable(h.name)) {
+      results.push({ ...h, killed: false, reason: 'not an auto-killable process name' });
+      continue;
+    }
+    try {
+      process.kill(h.pid, 'SIGKILL'); // SIGKILL: a stuck holder is the whole point
+      results.push({ ...h, killed: true, reason: 'terminated' });
+    } catch (err) {
+      // EPERM (someone else's process, sandboxed), ESRCH (already gone).
+      results.push({ ...h, killed: false, reason: err?.code ?? String(err) });
+    }
+  }
+  return results;
+}
+
+function killHoldersWindows(holders, killable) {
+  const results = [];
+  for (const h of holders) {
+    if (!killable(h.name)) {
+      results.push({ ...h, killed: false, reason: 'not an auto-killable process name' });
+      continue;
+    }
+    const kill = spawnSync('taskkill.exe', ['/F', '/PID', String(h.pid)], { encoding: 'utf8', windowsHide: true });
+    results.push({ ...h, killed: kill.status === 0, reason: kill.status === 0 ? 'terminated' : (kill.stderr ?? 'kill failed').trim() });
+  }
+  return results;
+}
+
+/** Windows-only handle-table scan, kept separate so the POSIX path stays readable. */
+function findHoldersWindows(comName) {
   const ps = spawnSync(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', `Add-Type -TypeDefinition @'\n${CS}\n'@; [PortHolder]::Find('${comName}')`],
@@ -156,23 +266,4 @@ export function findHolders(comName) {
     if (m) holders.push({ pid: Number(m[1]), name: m[2], device: m[3] });
   }
   return { ok: true, error: null, holders };
-}
-
-/**
- * Terminate holders, filtered by a killable(name) predicate. A Connect
- * takeover must never kill arbitrary processes: the caller decides which
- * names are fair game (our own Electron zombies), everything else is
- * reported untouched. Never throws.
- */
-export function killHolders(holders, killable = () => true) {
-  const results = [];
-  for (const h of holders) {
-    if (!killable(h.name)) {
-      results.push({ ...h, killed: false, reason: 'not an auto-killable process name' });
-      continue;
-    }
-    const kill = spawnSync('taskkill.exe', ['/F', '/PID', String(h.pid)], { encoding: 'utf8', windowsHide: true });
-    results.push({ ...h, killed: kill.status === 0, reason: kill.status === 0 ? 'terminated' : (kill.stderr ?? 'kill failed').trim() });
-  }
-  return results;
 }

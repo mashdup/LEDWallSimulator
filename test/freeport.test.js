@@ -29,6 +29,27 @@ test('parsePortArgs rejects unknown flags with a named complaint', () => {
   assert.match(r.usage, /unknown flag --force/);
 });
 
+test('parsePortArgs rejects LPT1, a bare number, and shell junk', () => {
+  assert.equal(parsePortArgs(['LPT1']).ok, false);
+  assert.equal(parsePortArgs(['8']).ok, false);
+  assert.equal(parsePortArgs(['/dev/null']).ok, false);
+  assert.equal(parsePortArgs(['/dev/tty']).ok, false);
+});
+
+test('parsePortArgs accepts the macOS and Linux names, and does NOT uppercase a path', () => {
+  // COM8 is uppercased for the Windows scan; '/dev/cu.usbmodem…' must arrive
+  // intact — /dev/CU.USBMODEM598 does not exist, and the uppercasing was the
+  // Windows assumption baked into the CLI.
+  assert.deepEqual(parsePortArgs(['/dev/cu.usbmodem59810005071']), {
+    ok: true, port: '/dev/cu.usbmodem59810005071', kill: false,
+  });
+  assert.equal(parsePortArgs(['cu.wchusbserial140', '--kill']).port, 'cu.wchusbserial140');
+  assert.equal(parsePortArgs(['usbmodem59810005071']).ok, true);
+  assert.deepEqual(parsePortArgs(['/dev/ttyACM0', '--kill']), { ok: true, port: '/dev/ttyACM0', kill: true });
+  assert.equal(parsePortArgs(['ttyUSB0']).ok, true);
+  assert.match(parsePortArgs([]).usage, /dev\/cu\.usbmodem/);
+});
+
 test('formatHolders names pid, process and device - the point of the tool', () => {
   const text = formatHolders([
     { pid: 17660, name: 'electron', device: '\\Device\\Serial2' },
