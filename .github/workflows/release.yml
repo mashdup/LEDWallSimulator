@@ -27,7 +27,12 @@ jobs:
           - os: ubuntu-latest
             args: --linux
           # arm64 (Apple Silicon) runner: builds the .dmg mac guests want.
-          - os: macos-latest
+          # macos-15, NOT macos-latest: latest is now macOS 26 (Darwin 25.6),
+          # where electron-builder's temp-keychain flow dies at
+          # `security set-key-partition-list` -> SecKeychainUnlock
+          # (measured on v0.11.6; Anvil's July signings ran on the then-latest
+          # macOS 15). Pin the proven image until electron-builder adapts.
+          - os: macos-15
             args: --mac
     runs-on: ${{ matrix.os }}
     # secrets is not a legal context in step-level if: expressions, so the
