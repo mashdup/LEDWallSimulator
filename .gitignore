@@ -40,3 +40,4 @@ relay/data/
 
 # electron-builder output: rebuilt per version, never source
 dist/
+secrets-local/
