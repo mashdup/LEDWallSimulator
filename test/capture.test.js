@@ -17,6 +17,9 @@ import {
   findChrome,
   safeCaptureUrl,
   parseCaptureParams,
+  chromeRoots,
+  chromeLayouts,
+  chromeInstalls,
 } from '../tools/capture.js';
 
 /**
@@ -565,4 +568,42 @@ test('a viewport-dependent page: the PNG always matches the geometry reported fo
     server.close();
     await capture.close();
   }
+});
+
+test('the browser lookup covers where each platform keeps Chromium today', () => {
+  // Three things have to line up on macOS, and the original list had none of
+  // them: Playwright's cache lives in ~/Library/Caches/ms-playwright (not
+  // ~/.cache), an Apple Silicon build unpacks to chrome-mac-arm64 (not
+  // chrome-mac), and current builds ship "Google Chrome for Testing.app" (not
+  // Chromium.app). Miss any one and a show Mac with no Chrome installed gets
+  // "no Chrome/Edge/Chromium found" for --page and /capture alike.
+  const darwinRoots = chromeRoots({ platform: 'darwin', env: {}, home: '/h' });
+  assert.ok(darwinRoots.includes('/h/Library/Caches/ms-playwright'),
+    `macOS must search Library/Caches, got ${darwinRoots.join(', ')}`);
+
+  const darwin = chromeLayouts('darwin');
+  assert.ok(darwin.full.some((p) => p[0] === 'chrome-mac-arm64'),
+    'Apple Silicon unpacks to chrome-mac-arm64');
+  assert.ok(darwin.full.some((p) => p.includes('Google Chrome for Testing.app')),
+    'current Playwright builds ship Google Chrome for Testing.app');
+  assert.ok(darwin.full.some((p) => p[0] === 'chrome-mac'),
+    'older Playwright builds unpack to chrome-mac');
+  assert.ok(chromeInstalls('darwin').some((p) => p.startsWith('/Applications/Google Chrome.app/')),
+    'a system Chrome on macOS must be findable');
+
+  // The platforms that already worked keep the paths they always had.
+  assert.equal(
+    chromeRoots({ platform: 'win32', env: { LOCALAPPDATA: 'L:' }, home: '/h' })[0],
+    'L:/ms-playwright',
+    'Windows keeps LOCALAPPDATA',
+  );
+  assert.deepEqual(chromeLayouts('win32').full[0], ['chrome-win64', 'chrome.exe']);
+  assert.ok(chromeLayouts('linux').full.some((p) => p[0] === 'chrome-linux64'));
+  assert.ok(chromeLayouts('linux').full.some((p) => p[0] === 'chrome-linux'),
+    'older Linux builds unpack to chrome-linux');
+  assert.ok(chromeInstalls('linux').includes('/usr/bin/chromium'));
+
+  // A headless shell is the last resort, never the first choice: a real browser
+  // paints the page the way the show sees it.
+  assert.ok(chromeLayouts('darwin').shell.length > 0, 'a shell is offered as a fallback');
 });

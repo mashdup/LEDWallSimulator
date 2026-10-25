@@ -53,58 +53,128 @@ const isConnectionLoss = (err) =>
 /**
  * Locate a browser we are allowed to drive headlessly.
  *
+ * Three separate things have to line up, and on macOS all three were wrong:
+ *
+ *  - the ROOT. Playwright's cache is %LOCALAPPDATA%\ms-playwright on Windows and
+ *    ~/.cache/ms-playwright on Linux — and `~/Library/Caches/ms-playwright` on
+ *    macOS, which this list never looked in. On a show Mac with no Chrome
+ *    installed, that Playwright Chromium is the only browser there is, so
+ *    `--page` and the /capture route answered "no Chrome/Edge/Chromium found"
+ *    while the same tree worked on Windows and on CI.
+ *  - the DIRECTORY a build unpacks to: `chrome-mac-arm64` on Apple Silicon,
+ *    `chrome-mac-x64` on Intel, `chrome-mac` in older Playwright; and
+ *    `chrome-linux64` replacing `chrome-linux`.
+ *  - the EXECUTABLE inside it: current builds ship **"Google Chrome for
+ *    Testing.app"**, not `Chromium.app`, so the old name misses a tree sitting in
+ *    exactly the right root.
+ *
  * Order is deliberate: an explicit LED_CHROME always wins (CI boxes, portable
  * builds, Brave, canary), then the newest Playwright-managed Chromium (newest
  * build number first, because those directories accumulate), then the normal
- * system installs. Pure fs checks — no shell, no `where`, no PATH scanning — so
- * behaviour is identical whatever the calling shell is.
+ * system installs, then a Playwright headless shell — a real browser paints the
+ * page the way the show sees it, a shell beats no capture at all. Pure fs checks
+ * — no shell, no `where`, no PATH scanning — so behaviour is identical whatever
+ * the calling shell is.
  */
+export function chromeRoots({ platform = process.platform, env = process.env, home = homedir() } = {}) {
+  const roots = [];
+  if (platform === 'darwin') roots.push(join(home, 'Library', 'Caches', 'ms-playwright'));
+  roots.push(join(env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'ms-playwright'));
+  roots.push(join(home, '.cache', 'ms-playwright'));
+  return roots;
+}
+
+/** Relative executable paths inside a chromium-<build> dir, full browser first. */
+export function chromeLayouts(platform = process.platform) {
+  if (platform === 'win32') {
+    return {
+      full: [['chrome-win64', 'chrome.exe'], ['chrome-win', 'chrome.exe']],
+      shell: [['chrome-headless-shell-win64', 'chrome-headless-shell.exe']],
+    };
+  }
+  if (platform === 'darwin') {
+    const testing = (dir) => [dir, 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'];
+    return {
+      full: [
+        testing('chrome-mac-arm64'),
+        testing('chrome-mac-x64'),
+        testing('chrome-mac'),
+        ['chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
+        ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
+      ],
+      shell: [['chrome-mac-arm64', 'headless_shell'], ['chrome-mac', 'headless_shell']],
+    };
+  }
+  return {
+    full: [['chrome-linux64', 'chrome'], ['chrome-linux', 'chrome']],
+    shell: [['chrome-linux64', 'headless_shell'], ['chrome-linux', 'headless_shell']],
+  };
+}
+
+/** System installs, in the order a show machine is likely to have them. */
+export function chromeInstalls(platform = process.platform) {
+  if (platform === 'win32') {
+    return [
+      'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    ];
+  }
+  if (platform === 'darwin') {
+    return [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+    ];
+  }
+  return [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+  ];
+}
+
 export function findChrome() {
   const override = process.env.LED_CHROME;
   if (override && existsSync(override)) return resolve(override);
 
-  // Where Playwright puts its downloads on Windows and on Unix-ish systems.
-  const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local');
-  const roots = [join(localAppData, 'ms-playwright'), join(homedir(), '.cache', 'ms-playwright')];
-
-  // Relative path of the executable inside a chromium-<build> directory.
-  const layout =
-    process.platform === 'win32'
-      ? ['chrome-win64', 'chrome.exe']
-      : process.platform === 'darwin'
-        ? ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium']
-        : ['chrome-linux64', 'chrome'];
-
-  for (const root of roots) {
-    let entries;
-    try {
-      entries = readdirSync(root, { withFileTypes: true });
-    } catch {
-      continue; // no Playwright cache here
+  const layouts = chromeLayouts();
+  const inRoots = (sets) => {
+    for (const root of chromeRoots()) {
+      let entries;
+      try {
+        entries = readdirSync(root, { withFileTypes: true });
+      } catch {
+        continue; // no Playwright cache here
+      }
+      const builds = entries
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith('chromium-'))
+        .map((entry) => entry.name)
+        // chromium-1243 is newer than chromium-1228; non-numeric names sort last.
+        .sort((a, b) => {
+          const na = Number(/^chromium-(\d+)$/.exec(a)?.[1] ?? -1);
+          const nb = Number(/^chromium-(\d+)$/.exec(b)?.[1] ?? -1);
+          return nb !== na ? nb - na : b.localeCompare(a);
+        });
+      for (const name of builds) {
+        for (const rel of sets) {
+          const candidate = join(root, name, ...rel);
+          if (existsSync(candidate)) return candidate;
+        }
+      }
     }
-    const builds = entries
-      .filter((entry) => entry.isDirectory() && entry.name.startsWith('chromium-'))
-      .map((entry) => entry.name)
-      // chromium-1243 is newer than chromium-1228; non-numeric names sort last.
-      .sort((a, b) => {
-        const na = Number(/^chromium-(\d+)$/.exec(a)?.[1] ?? -1);
-        const nb = Number(/^chromium-(\d+)$/.exec(b)?.[1] ?? -1);
-        return nb !== na ? nb - na : b.localeCompare(a);
-      });
-    for (const name of builds) {
-      const candidate = join(root, name, ...layout);
-      if (existsSync(candidate)) return candidate;
-    }
-  }
+    return null;
+  };
 
-  for (const candidate of [
-    'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  ]) {
+  const browser = inRoots(layouts.full);
+  if (browser) return browser;
+  for (const candidate of chromeInstalls()) {
     if (existsSync(candidate)) return candidate;
   }
-
-  return null;
+  return inRoots(layouts.shell); // last resort: a headless shell beats no capture
 }
 
 /**
