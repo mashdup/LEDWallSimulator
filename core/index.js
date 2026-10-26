@@ -33,6 +33,7 @@ export {
   PowerBudget,
   PeakMeter,
 } from './power.js';
+export { metaDelivery } from './metalink.js';
 export { downsampleArea, downsampleAreaRGB, blitArea } from './raster.js';
 export { Scroller, bitmap, LEFT, RIGHT } from './scroller.js';
 export { Panner, fitRect, fillRect, DOWN, UP } from './panner.js';

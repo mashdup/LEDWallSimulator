@@ -3,8 +3,9 @@
  *
  * One Panel, one frame loop. The loop rasterises the banner, clamps it against
  * the power budget, packs it through the layout, and hands finished frames to
- * whichever sink is selected. The sim and the wall consume the SAME bytes, so
- * what you see here is what the ESP32 will get — nothing here is throwaway.
+ * whichever sink is selected. The sim shows the wall's EXPECTED VIEW at full
+ * brightness - the un-scaled wire bytes - so a power clamp dims the wall,
+ * never the preview (the clamp reads out on the power line).
  *
  * core/ is imported unmodified from /core/*.js (see tools/serve.js): the browser
  * runs the identical modules the Node tests run.
@@ -24,6 +25,7 @@ import {
   PeakMeter,
   encodeFrameInto,
   meta,
+  metaDelivery,
   nextSeq,
   sameBytes,
   FrameDecoder,
@@ -55,8 +57,9 @@ const panel = new Panel();
 /** Scratch buffers allocated once: 30 fps x 1200 bytes is not something to GC. */
 const packed = new Uint8Array(RGB_BYTES);
 // The scaled copy: what the wall will actually draw after it folds in the
-// meta brightness, and therefore what the sim, the estimator and the peak
-// meter must look at. The wire carries `packed` raw.
+// meta brightness, and therefore what the estimator and the peak meter must
+// look at. The wire carries `packed` raw, and so does the sim: the preview
+// shows the design at full brightness, and the clamp lives on the power line.
 const rendered = new Uint8Array(RGB_BYTES);
 const wire = new Uint8Array(FRAME_BYTES);
 
@@ -140,8 +143,15 @@ let seq = 0;
  * image that is not changing leaves the wall showing whatever it had.
  */
 let lastSent = null;
-/** The brightness the wall was last told via meta; meta is re-sent on change. */
-let lastMetaBr = -1;
+/**
+ * What the wall has been told via meta (brightness + budget), as a state
+ * machine: re-sent on change, and — the part that keeps the LEDs honest —
+ * re-sent whenever the sink link comes BACK. The serial sink reconnects
+ * itself after a USB sag, the ESP32 power-cycles, its firmware boots at the
+ * default brightness, and the naive "send on change" rule leaves the wall
+ * full-bright with a dead-looking slider. See core/metalink.js.
+ */
+const metaState = metaDelivery();
 /** When the last frame went out, so the stale watchdog can be fed. */
 let lastSentMs = 0;
 let wallView = false;
@@ -403,9 +413,9 @@ function tick() {
   }
 
   // Colour before the power clamp: the estimator must see the bytes that actually
-  // leave, and the sim draws these same packed bytes, so the preview stays honest.
-  // Saturation pulls each pixel away from its own mean, which is what rescues a
-  // pastel that the diffuser and a bright wall would otherwise wash to white.
+  // leave. Saturation pulls each pixel away from its own mean, which is what
+  // rescues a pastel that the diffuser and a bright wall would otherwise wash
+  // to white. The preview draws these same un-scaled bytes (see draw()).
   applyColor(panel.pixels, {
     saturation: Number($('saturation').value),
     gamma: Number($('gamma').value),
@@ -420,8 +430,11 @@ function tick() {
   // brightness into renderWall(), and the DDP transport applies it to the
   // frames that follow. Scaling the wire bytes here as well made the wall
   // display k-squared — half the clamp, squared, and a visibly dim wall.
-  // `rendered` is the scaled copy the estimator, the peak meter and the sim
-  // see, which is what the wall will actually draw once the sink scales it.
+  // `rendered` is the scaled copy the estimator and the peak meter see,
+  // which is what the wall will actually draw once the sink scales it. The
+  // sim deliberately does NOT look at this copy: the preview shows the
+  // design at full brightness, because a preview that dims with the power
+  // clamp reads like the content changed when only the budget did.
   rendered.set(packed);
   if (k < 1) for (let i = 0; i < rendered.length; i++) rendered[i] = (rendered[i] * k) | 0;
 
@@ -430,11 +443,14 @@ function tick() {
 
   // The clamp moves between scene changes (its peak-hold is monotonic), so
   // a meta re-send on change is rare — 5 bytes, and the wall's applied
-  // brightness stops being whatever the first frame asked for.
+  // brightness stops being whatever the first frame asked for. The link
+  // check is what makes the re-send cover the case change cannot see: a
+  // silent serial reconnect has rebooted the wall back to its default
+  // brightness, and a meta refused during the dark window is still owed.
+  metaState.noteLink(sink === null || sink.connected !== false);
   const br = Math.round(k * 255);
-  if (br !== lastMetaBr) {
-    lastMetaBr = br;
-    sink?.send(meta({ brightness: br, limitMa: Math.round(budget.limitMa) }));
+  if (metaState.owed(br)) {
+    metaState.told(br, sink?.send(meta({ brightness: br, limitMa: Math.round(budget.limitMa) })) !== false);
   }
 
   // A frame goes out when the bytes changed, or when the wall's stale-frame
@@ -479,11 +495,12 @@ function draw() {
   // Nothing displays a hidden tab, so the canvas work is pure waste there — but
   // the bytes above it still went out, which is the whole point of the split.
   if (document.hidden) return;
-  // Both views draw the SAME scaled bytes; only the display layout differs.
-  // Drawing the rendered array at the sender's own layout reproduces the design
-  // as authored (byte layout.index(x,y) lands on cell (x,y)), so the sim shows
-  // exactly the brightness the wall receives instead of the unclamped panel.
-  sim.drawWall(rendered, wallView ? wallLayout : layout);
+  // The preview is the wall's EXPECTED VIEW, brightness ignored: it draws the
+  // raw wire bytes, before the power clamp's k. The clamp is a property of the
+  // power system, not of the content, and a preview that dimmed with it reads
+  // as the picture changing when only the budget moved. k and the mA readouts
+  // live on the power line, which is where a clamp is visible on purpose.
+  sim.drawWall(packed, wallView ? wallLayout : layout);
   sim.setOverlay($('overlay').checked);
 }
 
@@ -536,8 +553,7 @@ async function connect() {
     // Tell the wall our brightness and power budget before the first frame,
     // so it never runs an unbudgeted frame while the host is still measuring.
     const m = budget.toMeta();
-    lastMetaBr = m.brightness;
-    sink.send(meta(m));
+    metaState.told(m.brightness, sink.send(meta(m)) !== false);
     // A fresh sink has been given nothing, so the next tick must push even if the
     // image is not changing; otherwise connecting to a still wall shows nothing.
     lastSent = null;
@@ -583,8 +599,7 @@ async function connect() {
           }
         }
         const m2 = budget.toMeta();
-        lastMetaBr = m2.brightness;
-        sink.send(meta(m2));
+        metaState.told(m2.brightness, sink.send(meta(m2)) !== false);
         lastSent = null;
         setOutput($('sinkOut'), `connected: ${sink.kind} - ${lastSerialPort} (took over from the previous instance)`, 'ok');
         $('connect').disabled = true;
@@ -1184,8 +1199,9 @@ $('limitMa').addEventListener('change', () => {
   budget.limitMa = Number($('limitMa').value);
   budget.reset();
   const m = budget.toMeta();
-  lastMetaBr = m.brightness;
-  sink?.send(meta(m));
+  // Record the outcome with the delivery state: a refused send (cable out)
+  // stays owed, and the frame loop retries when the link is back.
+  metaState.told(m.brightness, sink?.send(meta(m)) !== false);
 });
 $('headroom').addEventListener('change', () => {
   budget.headroom = Number($('headroom').value);
@@ -1196,8 +1212,7 @@ $('headroom').addEventListener('change', () => {
   // must be told: the meta brightness rides the reset k.
   budget.reset();
   const m = budget.toMeta();
-  lastMetaBr = m.brightness;
-  sink?.send(meta(m));
+  metaState.told(m.brightness, sink?.send(meta(m)) !== false);
 });
 
 $('connect').addEventListener('click', connect);

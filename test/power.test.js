@@ -101,6 +101,40 @@ test('the requested brightness is respected when it is lower than the ceiling', 
   assert.equal(budget.clampedFrames, 0);
 });
 
+test('the slider is BIDIRECTIONAL: the power ratchet must never latch it', () => {
+  // The field report: "requested brightness does absolutely nothing". The
+  // requested k used to be folded INTO the one-way adaptive ceiling, so
+  // dragging the wall down worked once and the slider could never bring it
+  // back: min(want, ceiling) remembered the old low forever. An operator
+  // moving a slider is not a picture swinging its own ink; both directions
+  // must work.
+  const budget = new PowerBudget(24000, { headroom: 0 });
+  const p = new Panel();
+  p.fill(255, 255, 255);
+
+  assert.equal(budget.brightnessFor(p, 0.4), 0.4, 'down works');
+  assert.equal(budget.brightnessFor(p, 1), 1, 'back up recovers IMMEDIATELY, no reset');
+  assert.equal(budget.brightnessFor(p, 0.25), 0.25);
+  assert.equal(budget.brightnessFor(p, 0.6), 0.6);
+
+  // The ratchet keeps its power meaning: under a real clamp, raising the
+  // slider above the ceiling recovers only to the ceiling, and the ceiling
+  // still ratchets down across hot frames.
+  const tight = new PowerBudget(8000, { headroom: 0 });
+  const q = new Panel();
+  q.fill(255, 255, 255);
+  const low = tight.brightnessFor(q, 1); // ceiling ~ 8000/24000
+  assert.ok(low < 0.4, 'the clamp is the binding number here');
+  assert.equal(tight.brightnessFor(q, 0.2), 0.2, 'slider below the ceiling rules');
+  assert.equal(tight.brightnessFor(q, 1), low, 'slider above the ceiling: the ceiling rules');
+  assert.equal(tight.brightnessFor(q, 0.3), 0.3, 'and back under the ceiling: slider rules again');
+
+  // toMeta declares the APPLIED k, so the wall is lit with the number it is told.
+  const b2 = new PowerBudget(24000, { headroom: 0 });
+  b2.brightnessFor(p, 0.4);
+  assert.equal(b2.toMeta().brightness, Math.round(0.4 * 255), 'meta declares the slider, not the ceiling');
+});
+
 /*
  * The two that matter for the panel. Clamping against the frame's own ink makes
  * the wall's brightness a function of the picture: a scrolling banner dims and

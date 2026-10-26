@@ -69,6 +69,8 @@ export class PowerBudget {
     this.perChannelMa = opts.perChannelMa ?? WS2812_CHANNEL_MA;
     /** Current ceiling, lowered when an observed frame would have exceeded the limit. */
     this.k = this.maxBrightness;
+    /** The k the last frame was actually rendered at; see brightnessFor. */
+    this.appliedK = this.k;
     /** Worst frame at full brightness over the recent past; see brightnessFor. */
     this.worstFullMa = 0;
     this.lastMa = 0;
@@ -105,15 +107,26 @@ export class PowerBudget {
     this.worstFullMa = Math.max(this.worstFullMa, atFull);
 
     const limit = this.effectiveLimitMa;
-    // this.k is the adaptive ceiling: ONE state, shared with observe() and
-    // toMeta(). Folding it into the returned k means the brightness the page
-    // applies, the brightness the meta record declares, and the ceiling an
-    // over-budget frame lowers are the same number — the wall cannot be lit
-    // with one and told another.
-    let k = Math.min(want, this.k);
-    if (this.worstFullMa > limit) k = Math.min(k, limit / this.worstFullMa);
-    k = Math.max(this.minBrightness, k);
-    this.k = k;
+    /* this.k is the adaptive ceiling: ONE state, shared with observe() and
+     * toMeta(). The ratchet covers the POWER CEILING only — the requested
+     * brightness is NOT folded into it. Folding it in latched the slider into
+     * the one-way ratchet: dragging the wall down worked once, and dragging
+     * the slider back up could never brighten anything, because
+     * min(want, this.k) remembered the old low. The ratchet exists so the
+     * PICTURE cannot swing the wall's brightness; an operator moving a
+     * slider is the opposite of a picture, and must be bidirectional. */
+    let cap = this.k;
+    if (this.worstFullMa > limit) cap = Math.min(cap, limit / this.worstFullMa);
+    cap = Math.max(this.minBrightness, cap);
+    this.k = cap;
+
+    /* The requested brightness rides ON TOP of the ceiling: the slider can
+     * lower the wall, the ceiling can lower it further, and raising the
+     * slider recovers to min(ceiling) immediately — no reset needed. The
+     * applied k is the number the page scales by, the meta declares, and
+     * the estimator sees; this.k alone is only the ceiling. */
+    const k = Math.max(this.minBrightness, Math.min(want, cap));
+    this.appliedK = k;
 
     this.lastMa = atFull * k;
     if (this.lastMa > this.peakMa) this.peakMa = this.lastMa;
@@ -146,6 +159,7 @@ export class PowerBudget {
   /** Reset the adaptive ceiling (e.g. after a scene change or on a new meta frame). */
   reset(k = this.maxBrightness) {
     this.k = Math.max(this.minBrightness, Math.min(this.maxBrightness, k));
+    this.appliedK = this.k;
     /* A scene change starts the peak-hold over: holding a stale peak would leave
      * the new scene dim for as long as the release takes. */
     this.worstFullMa = 0;
@@ -153,9 +167,15 @@ export class PowerBudget {
     this.clampedFrames = 0;
   }
 
-  /** The meta-frame payload describing this budget to the wall. */
+  /** The meta-frame payload describing this budget to the wall. Declares the
+   * brightness the frames are ACTUALLY rendered at (appliedK: ceiling ∧
+   * requested), not the bare ceiling — the wall must be lit with the number
+   * it is told. min() with this.k keeps the invariant that meta never
+   * declares brighter than the current ceiling, even when observe() lowered
+   * that ceiling between two brightnessFor() calls. */
   toMeta() {
-    return { brightness: Math.round(this.k * 255), limitMa: Math.round(this.limitMa) };
+    const k = Math.min(this.appliedK, this.k);
+    return { brightness: Math.round(k * 255), limitMa: Math.round(this.limitMa) };
   }
 }
 
