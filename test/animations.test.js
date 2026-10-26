@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { animFrame, parseHex } from '../core/animations.js';
+import { ANIM_NAMES } from '../core/content-protocol.js';
 
 const G = 20;
 const lit = (px) => {
@@ -29,7 +31,7 @@ test('clear is black, fill is the color, rect draws a block', () => {
 });
 
 test('every named animation produces a lit, in-range frame', () => {
-  for (const name of ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock', 'sparkle']) {
+  for (const name of ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock', 'sparkle', 'pumpkin']) {
     const px = animFrame({ kind: 'anim', name }, 1791998675.123);
     // bounce is a 2x2 ball plus a 5-cell trail: at most 9 lit cells by design.
     const min = name === 'bounce' ? 5 : 10;
@@ -89,6 +91,61 @@ test('snitch: gold-dominant comet on a dark sky, and it flies', () => {
   }
   assert.ok(moved > 10, `the snitch must move, ${moved} pixels changed`);
 });
+test("pumpkin: a jack-o'-lantern whose candle flickers on a night sky", () => {
+  const f = animFrame({ v: 1, kind: 'anim', name: 'pumpkin' }, 1234.5);
+  // The carve glows: the brightest pixel is the candlelight through the
+  // cuts - very bright, warm (green carried, blue starved), never white-blue.
+  let best = -1;
+  let bestPx = null;
+  for (let i = 0; i < f.length; i += 3) {
+    const lum = f[i] + f[i + 1] + f[i + 2];
+    if (lum > best) { best = lum; bestPx = [f[i], f[i + 1], f[i + 2]]; }
+  }
+  assert.ok(bestPx[0] > 240, `carve glow core must be bright, got ${bestPx}`);
+  assert.ok(bestPx[1] > 120, `candlelight carries green, got ${bestPx}`);
+  assert.ok(bestPx[2] < 180 && bestPx[0] > bestPx[2] + 90, `carve glow must be warm, got ${bestPx}`);
+  // The pumpkin IS the subject: an orange-dominant body must fill a good
+  // part of the panel (the ellipse of a 20-grid pumpkin is ~120 cells).
+  let orange = 0;
+  for (let i = 0; i < f.length; i += 3) {
+    const [r, g, b] = [f[i], f[i + 1], f[i + 2]];
+    if (r > 120 && g > 30 && g < r * 0.75 && b < g) orange++;
+  }
+  assert.ok(orange >= 50, `pumpkin body must dominate, got ${orange}/400 orange`);
+  // Night above the pumpkin: the top row is sky, not a wash.
+  let dark = 0;
+  for (let x = 0; x < G; x++) {
+    const [r, g, b] = at(f, x, 0);
+    if (r + g + b < 200) dark++;
+  }
+  assert.ok(dark >= 18, `the top row must be night sky, ${dark}/${G} dark`);
+  // Regression guard for the field complaint "the sky flickers pink to
+  // blue": the old sky was purple (red over green) and the star twinkle
+  // bottomed out BELOW the sky, so every star cell opened a dark hole and
+  // closed it again - a brightness inversion reads as a color flicker.
+  // The sky rows must be blue-dominant (green over red) and never darker
+  // than the sky floor, in every sky cell, all the time.
+  for (let s = 0; s < 20; s += 0.4) {
+    const g2 = animFrame({ v: 1, kind: 'anim', name: 'pumpkin' }, 1234.5 + s);
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < G; x++) {
+        const [r, g, b] = at(g2, x, y);
+        assert.ok(g >= r && b >= 20, `sky cell (${x},${y}) must be night blue, got ${[r, g, b]}`);
+      }
+    }
+  }
+  // The candle FLICKERS: half a second later the glow and the body have
+  // moved; a static frame is a painted pumpkin, not a living one.
+  const f2 = animFrame({ v: 1, kind: 'anim', name: 'pumpkin' }, 1235.0);
+  let moved = 0;
+  for (let i = 0; i < f.length; i += 3) {
+    if (Math.abs(f[i] - f2[i]) + Math.abs(f[i + 1] - f2[i + 1]) + Math.abs(f[i + 2] - f2[i + 2]) > 20) moved++;
+  }
+  assert.ok(moved > 10, `the candle must flicker, ${moved} pixels changed`);
+  // Pure like every animation: the same server second, the same bytes.
+  assert.deepEqual(f, animFrame({ v: 1, kind: 'anim', name: 'pumpkin' }, 1234.5));
+});
+
 test('sparkle: a pink field that sparkles, and the sparkles twinkle', () => {
   const f = animFrame({ v: 1, kind: 'anim', name: 'sparkle' }, 1234.5);
   // DOMINANTLY pink is the brief, so measure the whole panel, not one pixel:
@@ -146,6 +203,21 @@ test('sparkle: a pink field that sparkles, and the sparkles twinkle', () => {
 });
 
 import { emptyPixels, pixelsToHex } from '../core/drawings.js';
+
+test('content.html renders animations from the core library, not a copy', () => {
+  // The canvas page and the frame driver must show the SAME bytes. They once
+  // each carried a switch, with no test comparing them: drift in one was
+  // invisible to the other. The page now paints animFrame's output, so the
+  // page must not carry per-animation case labels of its own.
+  const html = readFileSync(new URL('../web/content.html', import.meta.url), 'utf8');
+  const m = /function animDraw\([\s\S]*?\n}/.exec(html);
+  assert.ok(m, 'animDraw must exist');
+  assert.ok(m[0].includes('animFrame('), 'animDraw must delegate to core animFrame');
+  for (const name of ANIM_NAMES) {
+    if (name === 'demo') continue; // draw() switches on the STATE kind 'demo'
+    assert.ok(!html.includes(`case '${name}'`), `content.html must not own a '${name}' renderer`);
+  }
+});
 
 test('a pic state paints its own cells, and an unused cell is black, not white', () => {
   const p = emptyPixels();

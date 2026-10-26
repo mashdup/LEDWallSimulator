@@ -294,6 +294,83 @@ export function animFrame(state, tRaw, grid = 20) {
       }
       return px;
     }
+    case 'pumpkin': {
+      // Jack-o'-lantern for Halloween: a fat pumpkin on a night sky, a candle
+      // flickering inside it, and a bat flapping across the top. Pure like
+      // every animation: the flicker is the noise field sampled along the
+      // time axis, so every renderer flickers in lockstep, no state.
+      const cx = (grid - 1) / 2;
+      const cy = grid * 0.62;
+      const rx = grid * 0.36;
+      const ry = grid * 0.28;
+      const flick = noise(t * 5.7 + 13.1, 8.3);         // the candle, 0..1
+      const candle = 0.72 + 0.28 * noise(t * 5.7, 3.7); // body glow envelope
+      const glow = [255, 150 + 90 * flick, 40 + 120 * flick]; // light through the carve
+      for (let y = 0; y < grid; y++) {
+        for (let x = 0; x < grid; x++) {
+          const star = hash(x * 157.3 + y * 71.7);
+          if (star > 0.94) {
+            // The twinkle is a shimmer of brightness, never a swap of role:
+            // tw stays in [0.24, 1.0] so a star cell never sinks BELOW the
+            // sky. A star dipping under the sky opens a dark hole that closes
+            // again, and a hole reads as a color flicker, not a twinkle.
+            const tw = 0.62 + 0.38 * Math.sin(t * (1.2 + star * 2) + star * 40);
+            set(x, y, 70 * tw, 76 * tw, 118 * tw);
+          } else {
+            // Night blue, green-over-red: purple sky (red-over-green) reads
+            // pink next to the blue stars, and the pair then alternates hue.
+            set(x, y, 6, 8, 20);
+          }
+        }
+      }
+      // The body: an ellipse, dark at the rim, vertical ridges, brightened
+      // toward the middle where the candle sits behind the wall of flesh.
+      for (let y = 0; y < grid; y++) {
+        for (let x = 0; x < grid; x++) {
+          const dx = (x - cx) / rx;
+          const dy = (y - cy) / ry;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > 1) continue;
+          const ridge = 0.82 + 0.18 * Math.cos(dx * 4.4);
+          const f = candle * (0.85 + 0.15 * (1 - d2)) * ridge;
+          set(x, y, 255 * f, 110 * f, 12 * f);
+        }
+      }
+      const stem = Math.round(cy - ry) - 1;
+      set(Math.round(cx), stem, 90 * candle, 60 * candle, 26 * candle);
+      set(Math.round(cx) + 1, stem - 1, 70 * candle, 48 * candle, 22 * candle);
+      // The carved face: candlelight through the cuts. Triangle eyes closing
+      // toward the grin, a nose, a toothed zigzag mouth.
+      const put = (x, y) => set(x, y, glow[0], glow[1], glow[2]);
+      for (const s of [-1, 1]) {
+        const ex = Math.round(cx + s * rx * 0.45);
+        const ey = Math.round(cy - ry * 0.4);
+        put(ex - 1, ey);
+        put(ex, ey);
+        put(ex + 1, ey);
+        put(ex + (s < 0 ? 0 : -1), ey + 1);
+        put(ex + (s < 0 ? 1 : -2), ey + 2);
+      }
+      const ny = Math.round(cy + ry * 0.15);
+      put(Math.round(cx) - 1, ny);
+      put(Math.round(cx), ny);
+      const my = Math.round(cy + ry * 0.55);
+      for (let x = Math.round(cx - rx * 0.55); x <= Math.round(cx + rx * 0.55); x++) put(x, my);
+      put(Math.round(cx - rx * 0.35), my - 1);
+      put(Math.round(cx + rx * 0.35), my - 1);
+      put(Math.round(cx - rx * 0.15), my + 1);
+      put(Math.round(cx + rx * 0.15), my + 1);
+      // One bat per 34 s cycle, wings from a hard-flapping sign.
+      const bt = t % 34;
+      if (bt < 14) {
+        const bx = Math.round(-2 + (bt / 14) * (grid + 4));
+        const tip = Math.sin(bt * 14) > 0 ? -1 : 1;
+        set(bx, 2, 52, 56, 84);
+        set(bx - 1, 2 + tip, 52, 56, 84);
+        set(bx + 1, 2 + tip, 52, 56, 84);
+      }
+      return px;
+    }
     default: { // 'demo' and any future name falls back to the original
       const bx = Math.round((Math.sin(t * 1.3) * 0.5 + 0.5) * (grid - 1));
       const by = Math.round((Math.sin(t * 0.9) * 0.5 + 0.5) * (grid - 1));

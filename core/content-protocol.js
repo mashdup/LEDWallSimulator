@@ -35,7 +35,7 @@ export const CONTENT_KINDS = ['clear', 'fill', 'rect', 'text', 'anim', 'pic', 'g
  * headless capture browser - render the identical frame at the same second.
  * 'off' stops animation (black); 'demo' is the original bouncing block.
  */
-export const ANIM_NAMES = ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock', 'snitch', 'sparkle', 'off'];
+export const ANIM_NAMES = ['demo', 'bounce', 'rain', 'fire', 'plasma', 'bars', 'clock', 'snitch', 'sparkle', 'pumpkin', 'off'];
 
 /**
  * What may fill the break between gallery drawings: every animation, plus

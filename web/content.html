@@ -61,7 +61,7 @@ import { startKeepAlive } from './keep-alive.js';
 import { Panel, Scroller } from '../core/index.js';
 import { GRID, pixelsFromHex } from '../core/drawings.js';
 import { gallerySlot } from '../core/content-protocol.js';
-import { animFrame, hsl } from '../core/animations.js';
+import { animFrame } from '../core/animations.js';
 import { applyTransition } from '../core/transitions.js';
 import { Banner } from './banner.js';
 /*
@@ -283,229 +283,23 @@ function draw() {
 }
 
 // ---- the animation library -------------------------------------------------
-// Every animation is a pure function of server time: no state, no clocks, no
-// randomness that diverges between instances. "Random" texture comes from
-// deterministic hashes of coordinates - the same pixels in every renderer,
-// forever in phase. t is seconds since the epoch, shared by all.
+// This IS the library, not a copy of it: every frame comes from the same
+// pure generator (core/animations.js) that the app tab's frame driver runs,
+// painted with the same paintBytes the gallery path already used. What this
+// page shows and what the wall lights are the same bytes BY CONSTRUCTION.
+//
+// The canvas-side copy of the whole animation switch that lived here was a
+// standing invitation to drift from core in silence: no test compared the
+// two renderers, so any of them could paint a frame the other would not.
+// That is exactly the shape of bug a field report like 'the sky flickers
+// pink to blue' needs to exist. One library, one paint path, no drift.
+//
+// t is server time in seconds. core's animFrame wraps the epoch into one
+// hour of phase itself (the quantization-jitter fix), and 'clock' is the
+// one animation that reads the raw epoch - handled there, not here.
 
 function animDraw(name, tRaw) {
-  WALL.clear();
-  const G = WALL.grid;
-  // Wrap the epoch clock into a compact range BEFORE any periodic math.
-  // t is ~1.8e9 seconds: t*12 lands at 2e10, where a double's spacing is
-  // ~4000 - modulo and hue arithmetic quantize into giant chaotic jumps,
-  // which the eye reads as flicker and restarts. One hour of phase is all
-  // any of these need; the wrap discontinuity is once an hour, invisible.
-  // 'clock' is the one animation that must see the raw epoch (it shows real
-  // time), so it takes tRaw.
-  const t = tRaw % 3600;
-  switch (name) {
-    case 'off':
-      return;
-    case 'bounce': {
-      // A ball on Lissajous paths, with a fading trail of its recent positions.
-      const trail = 5;
-      for (let k = trail; k >= 1; k--) {
-        const tk = t - k * 0.09;
-        const x = Math.round((Math.sin(tk * 1.7) * 0.5 + 0.5) * (G - 1));
-        const y = Math.round((1 - Math.abs(Math.sin(tk * 2.3))) * (G - 1));
-        WALL.set(x, y, `rgba(255,136,0,${(1 - k / (trail + 1)).toFixed(2)})`);
-      }
-      const bx = Math.round((Math.sin(t * 1.7) * 0.5 + 0.5) * (G - 1));
-      const by = Math.round((1 - Math.abs(Math.sin(t * 2.3))) * (G - 1));
-      WALL.rect(bx, by, 2, 2, '#ff8800');
-      return;
-    }
-    case 'rain': {
-      // Columns of drops at hashed speeds; head bright, tail fading. The
-      // position is (t * speed + phase) mod depth - pure, periodic, synced.
-      for (let c = 0; c < G; c++) {
-        const speed = 5 + hash(c) * 9;              // cells per second
-        const phase = hash(c + 100) * (G + 6);
-        const pos = (t * speed + phase) % (G + 6);  // spawns above the top
-        const head = Math.floor(pos);
-        for (let k = 0; k < 5; k++) {
-          const y = head - k;
-          if (y < 0 || y >= G) continue;
-          const a = 1 - k / 5;
-          WALL.set(c, y, k === 0 ? '#bfe8ff' : `rgba(60,140,255,${a.toFixed(2)})`);
-        }
-      }
-      return;
-    }
-    case 'fire': {
-      // Classic flame: a hot base row, heat decaying upward, flicker from a
-      // deterministic noise scrolled downward by time.
-      for (let y = 0; y < G; y++) {
-        for (let x = 0; x < G; x++) {
-          const n = noise(x * 0.9, y * 0.9 - t * 7);
-          const heat = Math.max(0, 1 - (G - 1 - y) / (G * 0.75)) * (0.55 + 0.45 * n);
-          if (heat <= 0.08) continue;
-          const c = heat > 0.85 ? '#ffffff' : heat > 0.6 ? '#ffd23f' : heat > 0.35 ? '#ff5a00' : '#8c1d00';
-          WALL.set(x, y, c);
-        }
-      }
-      return;
-    }
-    case 'plasma': {
-      // The plasma field: three overlapping sine waves, hue from the sum.
-      for (let y = 0; y < G; y++) {
-        for (let x = 0; x < G; x++) {
-          const v = Math.sin(x / 3 + t * 1.1) + Math.sin(y / 4 + t * 0.7) + Math.sin((x + y) / 5 + t * 1.7);
-          const hue = ((v + 3) / 6) * 300 + t * 12;
-          WALL.set(x, y, `hsl(${hue.toFixed(0)}, 100%, 52%)`);
-        }
-      }
-      return;
-    }
-    case 'bars': {
-      // A stereo equalizer: two overlapping waves drive bar heights.
-      for (let x = 0; x < G; x++) {
-        const h = Math.max(1, Math.round(
-          G * 0.5 * (1 + 0.55 * Math.sin(t * 2.1 + x * 0.7) + 0.45 * Math.sin(t * 3.3 + x * 1.9)) / 2
-        ));
-        for (let y = G - 1; y >= G - h; y--) {
-          const f = (G - y) / G; // 0 at the bottom, 1 at the top
-          WALL.set(x, y, f > 0.8 ? '#ff3355' : f > 0.55 ? '#ffcc00' : '#22dd66');
-        }
-      }
-      return;
-    }
-    case 'clock': {
-      // A real wall clock: hands from the server's epoch time, so every
-      // instance reads the same second - and the wall keeps time.
-      const d = new Date(tRaw * 1000);
-      const sec = d.getSeconds() + d.getMilliseconds() / 1000;
-      const min = d.getMinutes() + sec / 60;
-      const hr = (d.getHours() % 12) + min / 60;
-      const cx = (G - 1) / 2;
-      const cy = (G - 1) / 2;
-      // Dial ticks at 12, 3, 6, 9.
-      for (let k = 0; k < 4; k++) {
-        const a = (k * Math.PI) / 2 - Math.PI / 2;
-        WALL.set(Math.round(cx + Math.cos(a) * 8), Math.round(cy + Math.sin(a) * 8), '#333333');
-      }
-      const hand = (frac, len, css) => {
-        const a = frac * Math.PI * 2 - Math.PI / 2;
-        for (let r = 1; r <= len; r++) {
-          WALL.set(Math.round(cx + Math.cos(a) * r), Math.round(cy + Math.sin(a) * r), css);
-        }
-      };
-      hand(hr / 12, 4, '#ffffff');
-      hand(min / 60, 6, '#cccccc');
-      hand(sec / 60, 7, '#00ff66');
-      WALL.set(Math.round(cx), Math.round(cy), '#ffffff');
-      return;
-    }
-    case 'snitch': {
-      // The Golden Snitch: twinkling night sky + a gold comet darting
-      // along a noise-perturbed Lissajous. Pure function of server time,
-      // identical to core/animations.js - every renderer draws the same
-      // frame at the same second.
-      for (let y = 0; y < G; y++) {
-        for (let x = 0; x < G; x++) {
-          const star = hash(x * 157.3 + y * 71.7);
-          if (star > 0.93) {
-            const tw = 0.35 + 0.3 * Math.sin(t * (1.5 + star * 2) + star * 40);
-            WALL.set(x, y, `rgb(${Math.round(45 * tw)},${Math.round(50 * tw)},${Math.round(80 * tw)})`);
-          } else {
-            WALL.set(x, y, 'rgb(6,8,22)');
-          }
-        }
-      }
-      const pos = (tt) => [
-        (G - 1) * (0.5 + 0.4 * Math.sin(tt * 1.9) + 0.1 * (noise(tt * 1.3, 11.3) - 0.5) * 2),
-        (G - 1) * (0.5 + 0.4 * Math.sin(tt * 2.6 + 1.3) + 0.1 * (noise(tt * 1.3, 47.7) - 0.5) * 2),
-      ];
-      for (let k = 10; k >= 1; k--) {
-        const [tx, ty] = pos(t - k * 0.05);
-        const a = (1 - k / 11) * 0.55;
-        WALL.set(Math.round(tx), Math.round(ty), `rgb(${Math.round(255 * a)},${Math.round(200 * a)},${Math.round(60 * a)})`);
-      }
-      const [sx, sy] = pos(t);
-      const scx = Math.round(sx);
-      const scy = Math.round(sy);
-      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) WALL.set(scx + dx, scy + dy, 'rgb(130,100,30)');
-      WALL.set(scx, scy, 'rgb(255,214,90)');
-      return;
-    }
-    case 'sparkle': {
-      // Pink with sparkles, identical to core/animations.js: a deep rose
-      // field that drifts, sparse cells flashing white-pink on their own
-      // hash-driven period. Same cells, same phases, same order in every
-      // renderer - the twinkle is arithmetic, not randomness.
-      const base = new Float64Array(G * G * 3);
-      for (let y = 0; y < G; y++) {
-        for (let x = 0; x < G; x++) {
-          const n = noise(x * 0.16 + t * 0.07, y * 0.16 - t * 0.05);
-          const [r, g, b] = hsl(318 + 16 * (n - 0.5) * 2, 0.85, 0.22 + 0.18 * n);
-          const i = (y * G + x) * 3;
-          base[i] = r; base[i + 1] = g; base[i + 2] = b;
-        }
-      }
-      const flash = (x, y, f) => {
-        if (x < 0 || y < 0 || x >= G || y >= G) return;
-        const i = (y * G + x) * 3;
-        base[i] += (255 - base[i]) * f;
-        base[i + 1] += (236 - base[i + 1]) * f;
-        base[i + 2] += (248 - base[i + 2]) * f;
-      };
-      for (let y = 0; y < G; y++) {
-        for (let x = 0; x < G; x++) {
-          const seed = hash(x * 157.3 + y * 71.7);
-          if (seed <= 0.86) continue;
-          const period = 1.6 + seed * 4.0;
-          const p = ((t + seed * 100) % period) / period;
-          const w = Math.max(0, 1 - Math.abs(p - 0.5) * 2);
-          const f = w * w * w * w * w * w * w * w;
-          if (f < 0.02) continue;
-          flash(x, y, f);
-          const h = f * 0.5;
-          flash(x - 1, y, h); flash(x + 1, y, h); flash(x, y - 1, h); flash(x, y + 1, h);
-        }
-      }
-      for (let y = 0; y < G; y++) {
-        for (let x = 0; x < G; x++) {
-          const i = (y * G + x) * 3;
-          WALL.set(x, y, `rgb(${Math.round(base[i])},${Math.round(base[i + 1])},${Math.round(base[i + 2])})`);
-        }
-      }
-      return;
-    }
-    default: { // 'demo' and any future name falls back to the original
-      const bx = (Math.sin(t * 1.3) * 0.5 + 0.5) * (G - 1);
-      const by = (Math.sin(t * 0.9) * 0.5 + 0.5) * (G - 1);
-      WALL.rect(Math.round(bx), Math.round(by), 2, 2, '#ff8800');
-      const secs = Math.floor(t) % G;
-      for (let x = 0; x <= secs; x++) WALL.set(x, G - 1, '#00ff66');
-      return;
-    }
-  }
-}
-
-// Deterministic texture: hash of a number in [0,1), and smooth 2D value
-// noise. No Math.random anywhere - every renderer computes the same values,
-// so the wall, the tabs, and a freshly loaded capture page agree pixel for
-// pixel at the same server second.
-function hash(n) {
-  const v = Math.sin(n * 12.9898) * 43758.5453;
-  return v - Math.floor(v);
-}
-
-function noise(x, y) {
-  const xi = Math.floor(x);
-  const yi = Math.floor(y);
-  const xf = x - xi;
-  const yf = y - yi;
-  const h = (a, b) => hash(a * 127.1 + b * 311.7);
-  const s = (u) => u * u * (3 - 2 * u); // smoothstep
-  const n00 = h(xi, yi);
-  const n10 = h(xi + 1, yi);
-  const n01 = h(xi, yi + 1);
-  const n11 = h(xi + 1, yi + 1);
-  const a = n00 + (n10 - n00) * s(xf);
-  const b = n01 + (n11 - n01) * s(xf);
-  return a + (b - a) * s(yf);
+  paintBytes(animFrame({ kind: 'anim', name }, tRaw, WALL.grid));
 }
 
 // ---- user drawings ---------------------------------------------------------
