@@ -26,7 +26,7 @@ settings that render correctly:
 | Color Order | **BGR** |
 | Length | 400 |
 | Data pin (WLED rig) | GPIO21 |
-| Supply | 20 A @ 5 V |
+| Supply | 40 A @ 5 V (a 20 A supply also drives it) |
 | Matrix (WLED rig) | 20×20, one panel, vertical, serpentine off |
 | Panel flags (raw) | `v:1 s:0 r:0 b:0` |
 The sketch's S3 default is GPIO17, but **this wall's data lead is on GPIO21** —
@@ -70,11 +70,20 @@ did not.
 built-in controller** — the built-in controller is removed from the data line
 entirely, not left dangling on it.
 
+This wall is an **ESP32-S3 with its data lead on GPIO21**, and it runs **direct —
+GPIO21 to DIN, no level shifter** — which is what the diagram below shows. That
+arrangement was measured good on 2026-10-27: all four channels at `br=255`,
+`disc=0 resync=0`, no reboots. The shifter is **optional immunity** on this panel,
+not a prerequisite (see the level-shift bullet below for the 0.2 V spec gap, and
+"Bring-up order" for the evening it was proven innocent). On the classic ESP32 the
+same wire starts at GPIO27, which is a flash pin on the S3 and must not be used
+there.
+
 ```
 ESP32 3V3 ──────────────(logic only; NOT the panel supply)
-ESP32 GPIO27 ──[level shifter]──► panel DATA (DIN of the first bead in the chain)
+ESP32 GPIO21 (S3) ─────────────► panel DATA (DIN of the first bead in the chain)
 ESP32 GND ──────────────────────► panel GND   ┐
-5V PSU (>= 12 A @ 5 V; this wall is on 20 A) ──┴─► panel 5V
+5V PSU (>= 12 A @ 5 V; this wall is on 40 A) ─┴─► panel 5V
 ```
 
 Hard requirements:
@@ -89,6 +98,17 @@ Hard requirements:
   translator (TXB0104 / SN74AHCT1G08 / a 2N7000 low-side inverter stage) if you
   see intermittent colour errors. Do **not** use a resistor divider: it slows
   the data rate (these beads bit-time 350/1350 ns, ~588 kHz).
+
+  **The shifter is a chip, not a board feature — and on this wall it was proven
+  innocent.** The ESP32-S3 DevKitC has no level shifter on its GPIOs (the
+  CH9102F and the USB-CDC peripheral are unrelated chips), so a direct GPIO->DIN
+  drive really is 3.3 V into a 3.5 V spec. That gap is the only reason to add an
+  external gate; it is not a diagnosis. On 2026-10-27 a 74AHCT125 was wired in
+  (GPIO -> 1A/pin 2, 1Y/pin 3 -> DIN, VCC/pin 14 -> board 5V, GND/pin 7, all OE̅
+  to GND) and the wall went dark. The shifter was not the fault: the real cause
+  was the **Dupont jumper carrying the data**, and the direct 3.3 V drive works.
+  Re-add the gate only if intermittent colour errors appear. The trap and the
+  order are written up under "Bring-up order" below.
 - **Data into the FIRST pixel of the strip**, the end that the built-in
   controller used. The output of the last pixel is not connected to anything.
 - **A decoupling cap (1000 uF or more) at the panel's 5 V input**, and keep the
@@ -286,6 +306,77 @@ zone, so it stays the default. If brightness ever needs to grow, the move
 is a second power pair to the far corner (additive, same bus): the probe
 proves the far end takes full voltage at low current, so dual injection
 should roughly double the envelope.
+
+**Correction, 2026-10-27: the page default is no longer 8000, and it was
+reporting the wrong thing.** The console now starts at **limit 24000 with
+requested brightness 0.5** (`web/index.html`), because the 3–4 A ceiling this
+section leaned on was never the ribbon or the supply — it was a combination of a
+latched brightness slider (a bug, fixed) and the firmware's 8000 default re-
+applied every time the board rebooted. The ribbon's cumulative I·R loss is still
+real and still the reason a far end dims; what was wrong was treating the
+measured ceiling as a property of the wiring rather than of the software.
+
+## Bring-up order: cheap physical tests before theories (2026-10-27)
+
+A field report of "the wall is dim" turned into a long hunt that ended with
+**a bad Dupont jumper on the data line**. The lesson is the ORDER of tests, not
+the conclusion — every theory we chased was disprovable in seconds with no
+instruments.
+
+Symptoms the bad interconnect produced, all of which read as something else:
+
+- the wall showed **red for every colour** — red, green, blue, white, magenta all
+  looked red
+- green and blue stayed dark even at **0.8 A** (which wrongly ruled *out* a power
+  ceiling — at 0.8 A nothing should sag)
+- the wall was **dark after a PSU cycle**, then never painted again
+- the ESP32 decoded every frame perfectly: `frames` climbed, `disc=0 resync=0`
+
+The trap is the last one. **The decoder sits upstream of the data pin.** A board
+that decodes 1208/1208 frames proves only that the serial link and the RMT buffer
+are alive; it says nothing at all about whether valid edges leave the pin or reach
+the beads. "Counters clean, wall wrong" is the shape of every fault downstream of
+GPIO 21, and it is easy to read as "the firmware is fine, so it must be power."
+
+What actually localised it, and what should have been tried first:
+
+1. **The latch is an instrument.** APA106 beads hold their last frame forever
+   (this rig runs `STALE_MS=0`). A wall that is "stuck" on a colour may be
+   showing stale paint from the last time data arrived, not a live render. Cycle
+   the strip PSU to clear the latch, *then* send a frame: nothing appearing is
+   the real answer. Before the cycle, every colour reading was unreliable — and
+   several were being treated as measurements.
+2. **Swap the interconnect before theorising about it.** A Dupont jumper costs
+   seconds and is the cheapest moving part in the chain. An intermittent,
+   high-resistance connection degrades a 3.3 V edge exactly like this: works
+   sometimes, dead after a rework, and "red only" because a marginal signal gets
+   the red channel latched and not the two-die green/blue stacks.
+3. **Send one channel at a time and look** — `tools/channels.js <port>`. Steps
+   RED/GREEN/BLUE/WHITE/OFF while printing the counters on the same port. Content
+   is irrelevant here; the axis that localises is *which channel*, and no counter
+   can see light.
+4. **A flat field is the discriminator** between "the bytes are wrong" and "the
+   beads misread bits": every frame is byte-identical, so no rasteriser, desync,
+   torn frame or dropped byte can be at fault.
+
+Two theories that survived too long and were wrong, both worth remembering as
+deaths:
+
+- **"The PSU is in current limit."** A 40 A supply, and green at 0.8 A was dark.
+  A current limit cannot bite below its own threshold.
+- **"The level shifter is miswired."** The 74AHCT125 was wired correctly (and the
+  pinout questions along the way — data into 1A/pin 2, never into 3V3 or VIN —
+  were answered right). It was simply not the fault. The board has no built-in
+  shifter, which is a fact about the board, not evidence about the wall.
+
+The rule this section exists to enforce: **downstream of the data pin, counters
+are blind.** Prove the latch is clean, swap the cheapest wire, then read a colour —
+in that order, before any voltage is measured or any chip is added.
+
+The repo root's `probe/probe.ino` is the disposable tool for step 1 and 3: it drives every free
+GPIO high in turn (plain LEDs), then clocks a short red field per candidate data
+pin with the beads' own 350/1350 ns timing — which also finds an onboard RGB LED
+whose pin is not the one the docs expect.
 
 ## Self-test (`-D SELFTEST=1`)
 
@@ -881,11 +972,14 @@ of mA:
 | power guard | `limit=4000` → `br=42/42`; `limit=24000` → `br=255/255` |
 | watchdog | stream stopped → `state=dark`, `stale` climbed to 2 |
 
-Not verified: anything that needs the panel itself. The data line is not yet
-spliced to the board. The board is currently flashed with the S3 default,
-**GPIO17**, so the self-test runs dark — GPIO17 drives nothing. To watch
-bring-up with nothing wired, build `-DPIN_DATA=48` (the onboard WS2812),
-confirm the patterns light, then rebuild with no `-DPIN_DATA` and splice.
+Not verified **at the time of writing** — and now superseded: the data line IS
+spliced to the board and the panel is driven by this sketch on **GPIO21**, with
+all four channels verified at br=255 (2026-10-27). The board is currently flashed
+with the panel build (`-DPIN_DATA=21 -DSTALE_MS=0`), not the S3 default. To watch
+bring-up with nothing wired, build `-DPIN_DATA=48` — but note that pin number is a
+DevKitC-1 fact: a DevKitC *look-alike* board may put its RGB LED elsewhere, and a
+dark onboard LED on 48 says more about the board than the sketch. `probe/probe.ino`
+finds it empirically.
 
 The boot banner is one-shot from `setup()`, so `--status` (which attaches after
 reset) never shows it. Pulse EN over RTS with DTR deasserted — the same

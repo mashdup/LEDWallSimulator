@@ -46,14 +46,24 @@ Also define a meta frame (magic 0xA4) for brightness and power budget — see §
 
 Canvas, 20×20 cells scaled up, each cell drawn as a soft radial blob rather than a hard square — that approximates how diffused curtain LEDs actually blend, so what you see on screen matches what you'll get on the wall. Same Panel instance as the wall path. Include a "what the wall actually sees" toggle that renders with the physical index order, so you can preview a wiring mistake before it's installed.
 
-*Colour.* The renderer carries two output stages in `core/color.js`, applied to the
-finished frame before the power clamp — so the estimator and the sim both see the
-bytes that actually leave. **Saturation** pulls each pixel away from its own mean:
-a diffused wall and the eye's own desaturation at high luminance (the
-Bezold–Brücke shift) both wash a pastel toward white, and pure channels are the
-only ones that survive it. **Gamma** is the usual display curve, which deepens
-midtones at the same power draw. Both are host-side; the frame protocol stays raw
-RGB bytes and the sink stays dumb.
+*Colour.* `core/color.js` holds the **LED fine-tune**: four output stages applied
+to the finished frame — **white balance** (temperature + tint, cut-only per-channel
+gains, because the beads' R/G/B dies differ in efficiency so 255,255,255 is never
+neutral), **saturation** (pulls each pixel away from its own mean: a diffused wall
+and the eye's desaturation at high luminance — the Bezold–Brücke shift — both wash a
+pastel toward white, and pure channels are the only ones that survive it), **black
+level** (crushes the floor the diffuser's scattered ambient light raises, and stays
+white at the top), and **gamma** (the usual display curve, deepening midtones at the
+same power draw). All are host-side; the frame protocol stays raw RGB bytes and the
+sink stays dumb.
+
+**The preview shows none of them.** These correct the *physical wall*, so they are
+dialled by looking at the wall; applied to the design they make the operator watch
+the picture change while calibrating the hardware. The pipeline therefore packs the
+design into wire order first, snapshots that for the preview, then tunes the packed
+bytes in place — legal because packing permutes whole pixels and every one of these
+stages is per-pixel. The estimator reads the tuned bytes (those are what draw
+current), the preview does not. See `README.md`, "The wall's own calibration".
 
 ## 5. Transport
 
@@ -76,6 +86,8 @@ serve the page from `tools/serve.js`, which binds 127.0.0.1 for exactly that.
 ## 6. Power budget
 
 400 APA106/PL9823 beads at full white ≈ 12A at 5V. Realistically you'll never run full white, but the renderer should carry a global brightness multiplier plus a peak-current estimator: compare the estimate against the firmware's status-line draw.
+
+*(Written before the panel was measured: full white is the hard bound of 400 × 3 × 20 mA = **24 A**, and ~12 A is the realistic figure — see `firmware/README.md`, "Power envelope", and `README.md`, "The wall's own calibration", for the budget and headroom this ended up shipping with.)*
 1. core/ + tests — framebuffer, layout map, byte packing. Verify a known pattern packs to the expected 1200 bytes.
 2. Canvas sim scrolling live text from a local page.
 3. Power estimator + brightness clamp.
@@ -485,7 +497,7 @@ Two bugs the refactor exposed, both worth naming:
 
 ### 8.6 The console shows the relay, and does not touch it
 
-The console has one read-only line: `relay: wall.hoa.family - synced 3 s ago �
+The console has one read-only line: `relay: wall.hoa.family - synced 3 s ago �
 14 drawings`, `relay: wall.hoa.family - the relay refused the wall key (HTTP
 401)`, or `relay: off`. It reads `GET /relay` from the wall's own server, which
 answers from the client's state.
@@ -493,7 +505,7 @@ answers from the client's state.
 Read-only on purpose. The pairing is a command-line flag, and a field that
 could repoint the wall at another relay mid-party is a way to break the party
 with a stray click. The console's job at a party is to tell the owner that the
-queue is moving � not to be a second place to configure the same thing.
+queue is moving � not to be a second place to configure the same thing.
 
 ### 8.7 The card, and the QR that is not in this repo
 
@@ -504,6 +516,6 @@ agree with the server. It fetches nothing, and the relay's test asserts that.
 
 The QR code itself is deliberately **not** implemented here. A QR encoder is
 ~300 lines of GF(256) Reed-Solomon, format-info placement and mask penalties,
-and the failure mode is a matrix that looks right and does not scan � which is
+and the failure mode is a matrix that looks right and does not scan � which is
 a party that cannot start, and no test in this suite can scan one. Any generator
 on the internet makes a correct QR for a 25-character URL in five seconds.

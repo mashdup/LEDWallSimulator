@@ -73,6 +73,46 @@ browser:
 The page keeps its watchdogs in both modes (a `WATCH:` line in the fps
 readout, incident ring in `localStorage['wall-events']`).
 
+## The wall's own calibration (and why the preview ignores it)
+
+The console has two groups of controls that behave differently on purpose.
+
+**Power** — limit (mA), requested brightness, headroom. **Fine-tune** —
+saturation, gamma, temperature, tint, black level. Both are properties of the
+*physical wall*: the supply it is fed from, the diffuser in front of the beads,
+the beads' colour cast. They are dialled once per wall, by **looking at the
+wall**, not the screen.
+
+So neither one moves the preview:
+
+- The fine-tune is applied to the **packed wire bytes**, after the logical→
+  physical packing, and the preview draws a snapshot of the *untuned* design.
+  Packing permutes whole pixels and every one of these operations is per-pixel,
+  so tuning after the pack is byte-identical to tuning before it — it just lets
+  the preview keep the design. Tuning `panel.pixels` instead made the operator
+  watch the picture change while calibrating the wall.
+- The power clamp (`k`) is not applied to the preview either. A preview that
+  dims with the budget reads as the *content* changing when only the budget
+  moved; `k` and the mA figures live on the power readout, where a clamp is
+  visible on purpose.
+- **White balance is cut-only.** A channel cannot be driven past full, so
+  rebalancing a white point means taking light from the strong channels.
+  Gains are normalised so the largest is 1.0 — which is why correcting a cast
+  makes the wall slightly dimmer. That is the correction, not a fault.
+
+All eight values **persist to `localStorage`** and are restored before the first
+frame, and the markup carries this wall's calibration as the starting values so a
+fresh browser is correct with nothing saved: limit 24000, brightness 0.5,
+headroom 0.1, saturation 1.1, gamma 1.5, temperature 0.55, tint 0.25, black
+level 9. `test/settings.test.js` pins the list and the values.
+
+The **requested brightness slider is bidirectional**, and this is worth knowing
+because it was broken for a show: the adaptive power ceiling is deliberately a
+one-way ratchet (a picture must not be able to swing the wall's brightness), and
+folding the slider *into* that ratchet latched it — dragging down worked once and
+dragging back up could never brighten anything. The ratchet now covers the
+ceiling only; the requested value rides on top of it.
+
 ## The relay (guest drawings from phones)
 
 Set it once in the console, no command line, no shortcut flags: the
@@ -268,6 +308,30 @@ at a 1.7 us bit is ~20 ms of wire) and the rig's `torn=` counter are in
 4. The app picks the wch UART (COM8) by itself; Connect only if the picker
    must see a specific port.
 
+### One gotcha that costs hours: opening a serial port reboots the board
+
+The CH9102F asserts DTR/RTS when the port is **opened**, and this board's
+auto-reset circuit is wired to them, so **every connect — and every program that
+opens and closes the port — power-cycles the ESP32.** The firmware boots at its
+compile-time defaults, so `limitMa` is back to 8000 and brightness to 85/255,
+and every counter reads zero.
+
+Two consequences:
+
+- **A reboot looks exactly like a brownout.** Counters at 0, `lim=8000`, wall dim
+  or dark. Before blaming the supply, check whether a port was opened in between:
+  `frames` reset to 0 *plus* `lim` back to the default is the signature of a
+  reboot, not of a sag.
+- **Counters must be read in the same connection that streams.** Reading status
+  after the sender closed the port reads the post-reset board, not the board that
+  ran. `tools/flicker.js` streams and reports on one connection for this reason.
+
+The app handles it for you: `core/metalink.js` treats a link coming back up as
+the wall having **forgotten its brightness**, and re-sends the meta frame — which
+is why a silent serial reconnect mid-show no longer leaves the wall full-bright
+with a dead-looking slider. The CLI tools do not: if you drive the wall with
+`bridge.js`/`flicker.js` and then open the app, re-connect.
+
 ## Repo map
 
 | path | what |
@@ -279,4 +343,5 @@ at a 1.7 us bit is ~20 ms of wire) and the rig's `torn=` counter are in
 | `tools/start.js` | the launcher (`npm start` browser modes, `npm run wall` app mode) |
 | `relay/` | the public relay (Docker, its own README) |
 | `firmware/` | the ESP32 sink firmware (Arduino + WLED fork notes) |
+| `probe/` | disposable bring-up sketch: sweeps every GPIO, then clocks a red field per candidate data pin (finds an LED or a strip whose pin is not where the docs say) |
 | `test/` | node:test suite — `npm test` (headless-Chromium page tests included) |
