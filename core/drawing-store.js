@@ -91,9 +91,19 @@ export class DrawingStore {
    * renderer cycles by the clock and needs nothing else, and every field added
    * to a public list is one more thing a stranger can sort, correlate or
    * enumerate.
+   *
+   * Ordered by createdAt, HERE, at the source both servers answer from. The
+   * gallery freezes its rotation against a slot's start time and reads the list
+   * as "everything up to index count existed then", which is only true if the
+   * list is in creation order. `this.list` is append-only in ARRIVAL order, and
+   * entries adopted from the relay arrive in that order, not the order they were
+   * drawn - so a copy that is not sorted would put a rotation index on the wrong
+   * drawing. A stable sort also keeps same-millisecond entries in arrival order.
    */
   metas() {
-    return this.list.map(({ id, name, createdAt }) => ({ id, name, createdAt }));
+    return this.list
+      .map(({ id, name, createdAt }) => ({ id, name, createdAt }))
+      .sort((a, b) => a.createdAt - b.createdAt);
   }
 
   /**

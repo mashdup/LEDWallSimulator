@@ -57,11 +57,17 @@ export const GALLERY_DEFAULTS = {
  * The whole cadence as one pure function of the shared server clock, so the
  * wall, a human's tab and a capture browser that loads fresh mid-cycle all land
  * on the same slot of the same cycle - and on the same frame of the same
- * transition. A slot is one drawing plus its break, so a cycle is n slots:
+ * transition. A slot is one drawing plus its break, so:
  *
- *   period = interval + gap;  pos = t mod (n * period)
- *   slot   = floor(pos / period);  phase = pos - slot * period
- *   phase < interval ? drawing[slot] : the break
+ *   period = interval + gap;  slot = floor(t / period);  phase = t - slot*period
+ *   drawing = slot mod n;     phase < interval ? drawing : the break
+ *
+ * `n` may be a NUMBER (a fixed list) or an ARRAY of metas carrying `createdAt`
+ * (a live gallery). With an array the length is frozen per slot - a drawing
+ * submitted mid-slot joins at the next boundary instead of re-anchoring every
+ * boundary in the show. See the note in the body; this is the difference
+ * between a guest submission appearing at the next changeover and the whole
+ * gallery skipping.
  *
  * The transition opens EVERY seam of the slot, both ends of the drawing:
  *
@@ -97,24 +103,23 @@ export const GALLERY_DEFAULTS = {
  * anim: null, from: null, k: 0} - dark, and never an index into an empty list.
  */
 export function gallerySlot(tSec, n, interval = 8, gap = 0, gapAnim = 'none', transitionSec = 0) {
-  const count = Number.isInteger(n) && n > 0 ? n : 0;
-  if (count === 0) return { drawing: -1, anim: null, from: null, k: 0 };
   const show = Math.max(1, Number(interval) || 1);
   const brk = Math.max(0, Number(gap) || 0);
-  const breakSlot = () => ({ drawing: -1, anim: gapAnim === 'none' ? null : gapAnim });
-
   const period = show + brk;
-  const cycle = count * period;
-  const pos = ((tSec % cycle) + cycle) % cycle;
-  const slot = Math.floor(pos / period);
-  const phase = pos - slot * period;
+
+  /* The list length this slot may use is frozen AT THE SLOT; see slotFor.
+   * This is what stops a guest submission from resetting the show. */
+  const { count, drawing } = slotFor(tSec, n, period);
+  if (count === 0) return { drawing: -1, anim: null, from: null, k: 0 };
+  const breakSlot = () => ({ drawing: -1, anim: gapAnim === 'none' ? null : gapAnim });
+  const phase = tSec - Math.floor(tSec / period) * period;
 
   if (brk > 0 && phase >= show) {
     // The break proper: the blend that opened it finished at this instant.
     return { ...breakSlot(), from: null, k: 0 };
   }
 
-  const cur = { drawing: slot, anim: null };
+  const cur = { drawing, anim: null };
   // Half the drawing, so the seam at the start and the seam at the end of the
   // same drawing each get their blend and never meet in the middle.
   const trans = Math.max(0, Math.min(Number(transitionSec) || 0, (show - 0.25) / 2));
@@ -123,7 +128,7 @@ export function gallerySlot(tSec, n, interval = 8, gap = 0, gapAnim = 'none', tr
   // The seam at the START of the drawing: from what the previous slot was
   // showing when it ended - its break, if there is one, otherwise its drawing.
   if (phase < trans) {
-    const from = brk > 0 ? breakSlot() : { drawing: (slot - 1 + count) % count, anim: null };
+    const from = brk > 0 ? breakSlot() : prevSlot(tSec, n, period);
     return { ...cur, from, k: phase / trans };
   }
 
@@ -135,6 +140,161 @@ export function gallerySlot(tSec, n, interval = 8, gap = 0, gapAnim = 'none', tr
   }
 
   return { ...cur, from: null, k: 0 };
+}
+
+/**
+ * slotFor(tSec, n, period) -> {slotIndex, count, drawing}
+ *
+ * The rotation, as arithmetic on the shared clock. Two decisions live here and
+ * they are the whole fix for "a submission jumps the gallery":
+ *
+ * 1. A slot is `floor(t / period)` - a boundary in ABSOLUTE time. It used to be
+ *    `floor((t mod (count * period)) / period)`, so the modulus carried the
+ *    list length and a guest who submitted a drawing moved every boundary in
+ *    the show: the drawing on the wall changed mid-slot, a break appeared where
+ *    a drawing was, and a transition fired for it. A period-only modulus can
+ *    not be moved by anything but the cadence settings.
+ *
+ * 2. `count` is the number of drawings that already existed when this slot
+ *    BEGAN. `n` is either a number (a fixed list, all of it eligible) or an
+ *    array of metas carrying `createdAt` (a live gallery). With the array, a
+ *    drawing submitted mid-slot joins at the next boundary, which is the only
+ *    moment the viewer has already been shown is a change point.
+ *
+ * 3. The rotation is a QUEUE, walked from each drawing's own eligibility slot -
+ *    see queuePos. A submission appends to the back and is reached after a full
+ *    lap; it never re-positions the drawings already in line.
+ *
+ * Both stay pure functions of server time plus data the server already has, so
+ * the wall, a human's tab and a capture browser loading mid-cycle still agree.
+ *
+ * `createdAt` is epoch milliseconds and `tSec` is the same server clock divided
+ * by 1000, so the boundary `slotIndex * period` in seconds is
+ * `slotIndex * period * 1000` in the entries' own unit.
+ */
+function slotFor(tSec, n, period) {
+  const slotIndex = Math.floor(tSec / period);
+  const count = countAt(slotIndex, n, period);
+  if (count === 0) return { slotIndex, count: 0, drawing: -1 };
+  if (!Array.isArray(n)) return { slotIndex, count, drawing: wrap(slotIndex, count) };
+  return { slotIndex, count, drawing: queuePos(slotIndex, n, period) };
+}
+
+/**
+ * queuePos(slotIndex, metas, period) -> the drawing index this slot shows, or -1
+ *
+ * The gallery is a QUEUE: one slot per drawing, a new submission joins at the
+ * back and is reached after a full lap. Nothing is skipped or repeated by the
+ * arrival itself.
+ *
+ * Why not `slotIndex mod count`: that expression is discontinuous in `count`,
+ * and a live gallery's `count` changes every time a guest submits. The wall's
+ * position moves by whatever the two moduli happen to differ by. Measured at an
+ * 8 s interval, one submission made the rotation go 0 -> 3, skipping two
+ * drawings.
+ *
+ * The recurrence p -> (p + 1) mod c has no closed form when c changes, but c
+ * changes only at a boundary where a drawing became eligible, and BETWEEN those
+ * it is a plain +1. So walk the change points and close-form the stretches: one
+ * step per distinct eligibility slot. Because the eligible PREFIX is indexed, an
+ * appended drawing leaves every existing drawing at its own index, so walking
+ * the stretches never has to re-base a position.
+ *
+ * Cost: one pass over the list plus one modulo per distinct eligibility slot.
+ * The gallery is capped (--max-drawings, default 200), so that is a couple of
+ * hundred cheap steps per frame at worst, and the list is already scanned once
+ * per frame by countAt - the same order of work, not a new class of it.
+ *
+ * Deletions are the one case the walk cannot see, because a removed drawing
+ * leaves no `createdAt` behind: the count taken from the surviving list can be
+ * smaller than the history assumed, and the last modulo clamps the position back
+ * into range. A pruning can shift the rotation by a lap - once, never during a
+ * slot, and it cannot skip a drawing that still exists.
+ */
+function queuePos(slotIndex, metas, period) {
+  const msPerSlot = period * 1000;
+  const starts = [];
+  for (const m of metas) if (Number.isFinite(m?.createdAt)) starts.push(Math.ceil(m.createdAt / msPerSlot));
+  if (starts.length === 0) return -1;
+  starts.sort((a, b) => a - b);
+
+  /* Distinct change points, each with the count in effect from it onward.
+   * Because metas is in createdAt order, starts is already sorted and the count
+   * at the END of each group is simply its running index. */
+  const marks = [];
+  for (let i = 0; i < starts.length; ) {
+    const slot = starts[i];
+    while (i < starts.length && starts[i] === slot) i++;
+    marks.push({ slot, count: i });
+  }
+
+  /* Walk only the change points at or before the slot asked for; one step per
+   * distinct arrival slot, so a 200-drawing gallery costs at most 200.
+   *
+   * Within a stretch the queue is a plain +1 (wrapped at THAT stretch's count),
+   * and the step INTO a change point wraps at the count after the newcomers are
+   * in. The order is the rule: wrapping at the count before the arrival shifts
+   * the pointer by however much the queue grew, which is precisely how a
+   * submission came to skip the drawing that was next in line. */
+  let pos = 0;               // the gallery's first slot shows its first drawing
+  let cur = marks[0];
+  for (let j = 1; j < marks.length; j++) {
+    const next = marks[j];
+    if (next.slot > slotIndex) break;
+    pos = wrap(pos + (next.slot - cur.slot - 1), cur.count);   // run the stretch
+    pos = wrap(pos + 1, next.count);                           // step into the change
+    cur = next;
+  }
+  return wrap(pos + (slotIndex - cur.slot), cur.count);
+}
+
+// JS % follows the dividend's sign, and clock skew can make tSec negative.
+function wrap(v, m) {
+  return ((v % m) + m) % m;
+}
+
+/** How many of `n` existed at the start of slot `idx`. A number answers itself. */
+function countAt(idx, n, period) {
+  if (!Array.isArray(n)) return Number.isInteger(n) && n > 0 ? n : 0;
+  const startMs = idx * period * 1000;
+  let c = 0;
+  for (const m of n) if (Number.isFinite(m?.createdAt) && m.createdAt <= startMs) c++;
+  return c;
+}
+
+/**
+ * The slot before this one, as `{drawing, anim}` the renderer can fetch. Asked
+ * at the previous slot's midpoint, so it carries that slot's own frozen count:
+ * a list that grew one boundary ago must not borrow the new length to name the
+ * drawing the wall was actually on.
+ */
+function prevSlot(tSec, n, period) {
+  const prev = slotFor(tSec - period / 2, n, period);
+  return { drawing: prev.drawing, anim: null };
+}
+
+/**
+ * galleryNextMeta(metas, tSec, interval, gap) -> meta | null
+ *
+ * The drawing the NEXT slot will show. A renderer uses this to fetch a new
+ * drawing's pixels while the current one is still up, so a submission that
+ * becomes eligible at the next boundary is on screen already instead of opening
+ * as a dark frame - the one glitch a live gallery still has once the jumping is
+ * fixed. Returns null when the next slot is a break or there is nothing to
+ * fetch. Shares slotFor with the scheduler, so it cannot drift from it.
+ */
+export function galleryNextMeta(metas, tSec, interval = 8, gap = 0) {
+  if (!Array.isArray(metas) || metas.length === 0) return null;
+  const period = Math.max(1, Number(interval) || 1) + Math.max(0, Number(gap) || 0);
+  /* Any instant inside the next slot names the same drawing, because a slot's
+   * drawing index is constant across the slot (the break is a phase OF the slot,
+   * not a slot of its own). tSec + period is inside slot+1 for every phase, so
+   * this works while a drawing is up AND while the break is - which is the
+   * moment a fetch actually helps, since the boundary is up to `gap` seconds
+   * away and a fetch that waits for the boundary is a frame late. */
+  const next = slotFor(tSec + period, metas, period);
+  if (next.count === 0 || next.drawing < 0) return null;
+  return metas[next.drawing] ?? null;
 }
 
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$|^[a-zA-Z]+$/;

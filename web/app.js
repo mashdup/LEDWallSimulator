@@ -44,7 +44,7 @@ import { PageSource } from './page.js';
 import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
-import { ANIM_NAMES, makeMessage, gallerySlot, GAP_ANIM_NAMES, TRANSITION_NAMES, GALLERY_DEFAULTS } from '../core/content-protocol.js';
+import { ANIM_NAMES, makeMessage, gallerySlot, galleryNextMeta, GAP_ANIM_NAMES, TRANSITION_NAMES, GALLERY_DEFAULTS } from '../core/content-protocol.js';
 import { applyTransition } from '../core/transitions.js';
 import { animFrame } from '../core/animations.js';
 
@@ -870,8 +870,17 @@ function cSlotBytes(slot, tSec) {
 /** The bytes to push this tick: the slot, plus the transition into it. */
 function cGalleryBytes(tSec) {
   cGalleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
-  const slot = gallerySlot(tSec, cGallery.metas.length,
+  // The metas ARRAY, not its length: gallerySlot freezes the rotation's list
+  // length at each slot boundary, so a guest drawing submitted mid-slot joins at
+  // the next boundary instead of moving every boundary and skipping the show.
+  const slot = gallerySlot(tSec, cGallery.metas,
     cState.interval ?? 5, cState.gap ?? 0, cState.gapAnim ?? 'none', cState.transitionSec ?? 0);
+  // Warm the cache for the drawing the NEXT slot shows, while this one is up: a
+  // new submission becomes eligible at the next boundary, and fetching its pixels
+  // only then opens that boundary on a dark frame. Shares slotFor with the
+  // scheduler, so it cannot name a different drawing.
+  const next = galleryNextMeta(cGallery.metas, tSec, cState.interval ?? 5, cState.gap ?? 0);
+  if (next !== null && !cGallery.cache.has(next.id)) cGalleryFetch(next.id);
   const to = cSlotBytes(slot, tSec);
   // The transition is a slot boundary, not a timer: k comes from the same
   // clock arithmetic that picked the slot, so a page that loads mid-wipe is

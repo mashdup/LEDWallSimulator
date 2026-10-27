@@ -9,10 +9,12 @@ import {
   TRANSITION_NAMES,
   GALLERY_DEFAULTS,
   gallerySlot,
+  galleryNextMeta,
   makeMessage,
   parseMessage,
 } from '../core/content-protocol.js';
 import { emptyPixels, pixelsToHex, PIXEL_HEX_LEN } from '../core/drawings.js';
+import { readFileSync } from 'node:fs';
 
 test('channel and version are stable names', () => {
   assert.equal(CONTENT_CHANNEL, 'ledwall-content');
@@ -228,4 +230,193 @@ test('a transition opens every seam: into the drawing, and out of it', () => {
   assert.ok(ks[0] === 0 && ks[ks.length - 1] < 1 && ks[ks.length - 1] > 0.9, `0..1 across the window, saw ${ks}`);
   const out = [6, 6.5, 7, 7.5, 7.99].map((t) => gallerySlot(t, 2, 8, 5, 'rain', 2).k);
   assert.deepEqual(out, [...out].sort((a, b) => a - b), 'and so it rises on the way out');
+});
+
+/* A live gallery, in the server's own clock. gallerySlot's tSec is the server
+ * clock in SECONDS (Date.now()/1000) and entries carry createdAt in epoch MS -
+ * two units, one clock, and getting them wrong is the easiest way to write a
+ * test that proves nothing. Everything below is written in SECONDS and converted
+ * once, in meta().
+ *
+ * PERIOD is interval 8 + gap 5; S0 is a whole number of periods after the epoch,
+ * so it is exactly a slot boundary and every phase below is exact. */
+const EPOCH = 1_700_000_000_000;
+const SHOW = 8, GAP = 5, PERIOD = SHOW + GAP;
+const S0 = Math.ceil(EPOCH / 1000 / PERIOD) * PERIOD;
+
+/** metas from creation times in SECONDS. */
+const meta = (timesSec) => timesSec.map((t, j) => ({ id: `d${j}`, name: `d${j}`, createdAt: t * 1000 }));
+
+/** `n` drawings, each admitted at the start of its own slot, `n` slots before S0. */
+const established = (n) => meta(Array.from({ length: n }, (_, j) => S0 - (n - j) * PERIOD));
+
+/** Creation times (seconds) of `n` established drawings, `n` slots before S0. */
+const baseTimes = (n) => Array.from({ length: n }, (_, j) => S0 - (n - j) * PERIOD);
+
+/** The old arithmetic, kept here as the counter-example the fix is measured against. */
+function oldSlot(tSec, count, show, brk) {
+  if (count === 0) return -1;
+  const period = show + brk;
+  const cycle = count * period;
+  const pos = ((tSec % cycle) + cycle) % cycle;
+  const slot = Math.floor(pos / period);
+  const phase = pos - slot * period;
+  return phase >= show ? -1 : slot;
+}
+
+test('a drawing submitted mid-slot does not touch the slot in progress', () => {
+  // The field report: "a guest submits and the gallery jumps to the new drawing
+  // and keeps going". The cause was arithmetic - the cycle was count * period,
+  // so the modulus carried the list length and a guest changed it. Every
+  // boundary re-anchored against absolute time: the drawing on the wall swapped,
+  // a break appeared where a drawing was showing, and a transition fired for it.
+  const base = established(3);
+  for (const phase of [0.5, 4, 7.9, SHOW, PERIOD - 0.1]) {
+    const t = S0 + phase;
+    const before = gallerySlot(t, base, SHOW, GAP, 'rain', 2);
+    // The very same instant, with a drawing that arrived a moment ago.
+    const after = gallerySlot(t, meta([...base.map((m) => m.createdAt / 1000), t - 0.001]), SHOW, GAP, 'rain', 2);
+    assert.deepEqual(after, before, `a submission changed the slot at phase ${phase}`);
+  }
+});
+
+test('the old arithmetic really did jump, so this test is not vacuous', () => {
+  // Proving the fix is a fix: at the same instant the old formula moves and the
+  // new one does not. If both ever agree here, the regression is not covered and
+  // the test is decoration.
+  //
+  // t = S0 + 10 is mid-break, the point where adding a drawing used to change
+  // which drawing the wall would show next.
+  // The old shape is measured on a clock starting at 0, which is where it was
+  // wrong: its modulus was count * period, so a real instant exists at which
+  // adding a drawing moves the slot. 39 s, mid-slot for both lengths.
+  assert.notEqual(oldSlot(39, 3, SHOW, GAP), oldSlot(39, 4, SHOW, GAP),
+    `the old shape must jump here - saw ${oldSlot(39, 3, SHOW, GAP)} vs ${oldSlot(39, 4, SHOW, GAP)}`);
+  // And the new shape must not, at the equivalent point on the live clock.
+  const t = S0 + 4;
+  const base = established(3);
+  assert.equal(gallerySlot(t, base, SHOW, GAP, 'rain').drawing,
+    gallerySlot(t, meta([...base.map((m) => m.createdAt / 1000), t - 0.001]), SHOW, GAP, 'rain').drawing,
+    'the new shape must not');
+});
+
+test('a submitted drawing joins the rotation at the next boundary, in order', () => {
+  // One new drawing per slot: the queue walks 0,1,2,3... Never a repeat, never a
+  // skip. Counting the rotation from the slot the gallery became non-empty is
+  // what buys this - `slotIndex mod count` on an absolute index advances by one
+  // per slot only while count is fixed; when a guest adds a drawing the modulus
+  // of a two-billion-slot number moves and the position jumps.
+  // Three drawings already in the queue, then one submitted at each following
+  // boundary. The invariant is the STEP, not the absolute index (which depends on
+  // when the queue started): consecutive slots must differ by exactly +1 mod the
+  // count. That is "every drawing shown once, in order, nothing skipped" - and it
+  // is what `slotIndex mod count` breaks, because the modulus moves when a guest
+  // submits and the step becomes 2, or 0.
+  const seen = [];
+  for (let k = 0; k < 9; k++) {
+    const arrivals = Array.from({ length: k }, (_, j) => S0 + (j + 1) * PERIOD);
+    const count = 3 + k;
+    seen.push({
+      count,
+      drawing: gallerySlot(S0 + k * PERIOD, meta([...baseTimes(3), ...arrivals]), SHOW, GAP, 'none').drawing,
+    });
+  }
+  for (let k = 1; k < seen.length; k++) {
+    const step = ((seen[k].drawing - seen[k - 1].drawing) % seen[k].count + seen[k].count) % seen[k].count;
+    assert.equal(step, 1, `slot ${k} advanced by ${step}, not 1: ${seen.map((s) => s.drawing).join(',')}`);
+  }
+  assert.ok(seen.every((s) => s.drawing >= 0 && s.drawing < s.count), 'every index is in range');
+
+  // A list that is NOT growing still wraps, exactly as it always did.
+  const wrapped = Array.from({ length: 8 }, (_, i) =>
+    gallerySlot(S0 + i * PERIOD, established(3), SHOW, GAP, 'none').drawing);
+  assert.deepEqual(wrapped, [0, 1, 2, 0, 1, 2, 0, 1], `fixed list wraps, saw ${wrapped}`);
+});
+
+test('rapid submissions never change what is showing at the moment they arrive', () => {
+  // The multi-guest case from the report, stated as the invariant that matters:
+  // a drawing that arrived at time t must not change the descriptor AT time t.
+  // Comparing consecutive samples would measure the cadence instead - samples 3 s
+  // apart legitimately cross a designed boundary (a slot opens at phase 0, its
+  // break at phase SHOW). What is compared here is the SAME instant with and
+  // without a submission that landed a moment before it.
+  const base = established(3);
+  for (let i = 0; i < 30; i++) {
+    const t = S0 + i * 3;
+    const withNew = [...base, { id: `guest${i}`, name: 'guest', createdAt: t * 1000 - 1 }];
+    const quiet = gallerySlot(t, base, SHOW, GAP, 'rain', 2);
+    const loud = gallerySlot(t, withNew, SHOW, GAP, 'rain', 2);
+    const boundaryMs = Math.floor(t / PERIOD) * PERIOD * 1000;
+    const eligible = withNew[base.length].createdAt <= boundaryMs;
+    if (!eligible) {
+      const phase = t - Math.floor(t / PERIOD) * PERIOD;
+      assert.deepEqual(loud, quiet, `a submission changed the show at phase ${phase}`);
+    }
+  }
+});
+
+test('an empty gallery is dark, and the first drawing opens at its own boundary', () => {
+  assert.deepEqual(gallerySlot(S0, [], SHOW, GAP, 'rain'), { drawing: -1, anim: null, from: null, k: 0 });
+  // A single drawing, created mid-slot, becomes eligible at the NEXT boundary:
+  // its own slot's phase-0 shows it, and the break of that slot is still dark.
+  const one = [{ id: 'only', name: 'only', createdAt: (S0 + 1) * 1000 }];
+  assert.equal(gallerySlot(S0 + 0.5, one, SHOW, GAP, 'none').drawing, -1, 'not yet eligible');
+  assert.equal(gallerySlot(S0 + PERIOD, one, SHOW, GAP, 'none').drawing, 0, 'eligible at the boundary');
+  assert.equal(gallerySlot(S0 + PERIOD + SHOW, one, SHOW, GAP, 'rain').anim, 'rain', 'and it breaks');
+});
+
+test("a transition names the previous slot with the previous slot's count", () => {
+  // The blend at the start of a drawing must come FROM what the wall was on. If
+  // it borrowed the new list length it would name a drawing that was never
+  // shown, and the wipe would start from a frame the viewer did not see.
+  // Three established drawings, and a fourth admitted AT this boundary. Asked
+  // 0.1 s in, the blend is open; the wall came from the previous slot, which had
+  // only 3 eligible drawings, so `from` must be one of those - never index 3, the
+  // newcomer that had not been shown yet.
+  const grew = meta([...baseTimes(3), S0]); // arrives exactly at the boundary
+  const s = gallerySlot(S0 + 0.1, grew, SHOW, GAP, 'none', 2);
+  assert.ok(s.from !== null && s.k > 0, 'the boundary opens with a blend');
+  assert.ok(s.from.drawing < 3,
+    `from must be a drawing the wall could actually have been on, saw ${s.from.drawing}`);
+  assert.equal(s.drawing, 3, 'and the newcomer is what the wall is blending INTO');
+});
+
+test("galleryNextMeta prefetches the next slot's drawing, during a break too", () => {
+  const ms = established(3);
+  // While a drawing is up and while the break is up, the helper must name the
+  // SAME next drawing - and it must not be the current one. The fetch that
+  // matters happens during the break: the boundary is up to `gap` seconds away,
+  // so a fetch saved for the boundary arrives a frame late.
+  const duringShow = galleryNextMeta(ms, S0 + 4, SHOW, GAP);
+  const duringBreak = galleryNextMeta(ms, S0 + SHOW + 2, SHOW, GAP);
+  assert.ok(duringShow !== null && duringBreak !== null);
+  assert.equal(duringShow.id, duringBreak.id, 'both must name the next slot');
+  assert.notEqual(duringShow.id, `d${gallerySlot(S0 + 4, ms, SHOW, GAP, 'rain').drawing}`);
+  assert.equal(galleryNextMeta([], S0, SHOW, GAP), null, 'an empty gallery has nothing to prefetch');
+});
+
+test('the renderers pass the metas list, not its length', () => {
+  // The freeze only happens if the live gallery hands gallerySlot the array.
+  // Passing `.length` restores the old behaviour exactly, silently, and nothing
+  // on screen would notice until a guest submitted.
+  for (const f of ['web/app.js', 'web/content.html']) {
+    const src = readFileSync(f, 'utf8');
+    const call = /gallerySlot\(([^)]*)\)/.exec(src);
+    assert.ok(call, `${f} must call gallerySlot`);
+    assert.match(call[1], /\bmetas,/, `${f} must pass metas, not a count`);
+    assert.ok(!call[1].includes('metas.length'),
+      `${f} must not pass metas.length: a count cannot be frozen per slot`);
+  }
+});
+
+test('the drawing list is served in createdAt order', () => {
+  // The per-slot freeze reads the list as "everything up to index count existed
+  // then", which is only true if the list is in creation order. The store is the
+  // one place that knows, and both servers answer GET /drawings from it, so the
+  // sort lives there and nowhere else.
+  const src = readFileSync('core/drawing-store.js', 'utf8');
+  const body = /metas\(\) \{([\s\S]*?)\n  \}/.exec(src);
+  assert.ok(body, 'metas() must exist');
+  assert.match(body[1], /sort/, 'metas() must sort');
+  assert.match(body[1], /createdAt/, 'by createdAt');
 });

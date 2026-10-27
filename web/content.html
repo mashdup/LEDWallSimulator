@@ -60,7 +60,7 @@ import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
 import { Panel, Scroller } from '../core/index.js';
 import { GRID, pixelsFromHex } from '../core/drawings.js';
-import { gallerySlot } from '../core/content-protocol.js';
+import { gallerySlot, galleryNextMeta } from '../core/content-protocol.js';
 import { animFrame } from '../core/animations.js';
 import { applyTransition } from '../core/transitions.js';
 import { Banner } from './banner.js';
@@ -337,6 +337,9 @@ async function galleryRefresh(force = false) {
   gallery.inflight = fetch('/drawings', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : []))
     .then((metas) => {
+      // As served: DrawingStore.metas() returns the list in createdAt order, the
+      // one order the per-slot frozen rotation is valid against. Not re-sorted
+      // here - a second copy of that rule is a second thing that can drift.
       gallery.metas = Array.isArray(metas) ? metas : [];
       gallery.fetchedAt = Date.now();
     }, () => {
@@ -347,7 +350,10 @@ async function galleryRefresh(force = false) {
 }
 
 function gallerySlotNow(t) {
-  return gallerySlot(t, gallery.metas.length, state.interval ?? 5, state.gap ?? 0,
+  // The metas ARRAY, not its length: the scheduler freezes the list length at
+  // each slot boundary, so a guest drawing submitted mid-slot joins the rotation
+  // at the next one instead of moving every boundary and skipping the show.
+  return gallerySlot(t, gallery.metas, state.interval ?? 5, state.gap ?? 0,
     state.gapAnim ?? 'none', state.transitionSec ?? 0);
 }
 
@@ -373,6 +379,12 @@ function slotBytes(slot, t) {
 function galleryDraw(t) {
   galleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
   const slot = gallerySlotNow(t);
+  // Warm the cache for the drawing the NEXT slot will show, while this one is
+  // up. A submission becomes eligible at the next boundary; if its pixels are
+  // only fetched then, the boundary opens on a dark frame. slotFor is shared
+  // with the scheduler, so this can never name a different drawing.
+  const next = galleryNextMeta(gallery.metas, t, state.interval ?? 5, state.gap ?? 0);
+  if (next !== null && !gallery.cache.has(next.id)) galleryFetch(next.id);
   let bytes = slotBytes(slot, t);
   // The transition into this slot: the previous slot's frame, at the SAME
   // clock, blended by the same k every other renderer computes. The animation
