@@ -41,9 +41,13 @@ export { applyBrightness, blend, wipe, gradient } from './effects.js';
 export {
   applyColor,
   gammaTable,
+  whiteBalanceGains,
   COLOR_DEFAULTS,
   SATURATION_RANGE,
   GAMMA_RANGE,
+  TEMPERATURE_RANGE,
+  TINT_RANGE,
+  BLACK_LEVEL_RANGE,
   TYPICAL_GAMMA,
 } from './color.js';
 export {

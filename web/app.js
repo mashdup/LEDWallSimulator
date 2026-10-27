@@ -435,6 +435,9 @@ function tick() {
   applyColor(packed, {
     saturation: Number($('saturation').value),
     gamma: Number($('gamma').value),
+    temperature: Number($('temperature').value),
+    tint: Number($('tint').value),
+    blackLevel: Number($('blackLevel').value),
   });
 
   // Power clamp next: the multiplier is decided from the frame we just drew, so a
