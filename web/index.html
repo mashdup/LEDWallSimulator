@@ -154,19 +154,20 @@
 
     <fieldset>
       <legend>Power</legend>
-      <label>Limit <input id="limitMa" type="number" min="500" max="24000" step="100" value="8000"> mA</label>
-      <label>Requested brightness <input id="brightness" type="range" min="0" max="1" step="0.01" value="1"></label>
+      <label>Limit <input id="limitMa" type="number" min="500" max="24000" step="100" value="24000"> mA</label>
+      <label>Requested brightness <input id="brightness" type="range" min="0" max="1" step="0.01" value="0.5"></label>
       <label>Headroom <input id="headroom" type="range" min="0" max="0.5" step="0.05" value="0.1"></label>
       <div class="readout mono" id="powerOut"></div>
     </fieldset>
 
     <fieldset>
       <legend>LED fine-tune — the wall only, not the preview</legend>
-      <label>Saturation <input id="saturation" type="range" min="0" max="2" step="0.05" value="1"></label>
-      <label>Gamma <input id="gamma" type="range" min="0.5" max="2.5" step="0.05" value="1"></label>
-      <label>Temperature <input id="temperature" type="range" min="-1" max="1" step="0.05" value="0"> <span class="note">cool ↔ warm</span></label>
-      <label>Tint <input id="tint" type="range" min="-1" max="1" step="0.05" value="0"> <span class="note">green ↔ magenta</span></label>
-      <label>Black level <input id="blackLevel" type="range" min="0" max="64" step="1" value="0"></label>
+      <label>Saturation <input id="saturation" type="range" min="0" max="2" step="0.05" value="1.1"></label>
+      <label>Gamma <input id="gamma" type="range" min="0.5" max="2.5" step="0.05" value="1.5"></label>
+      <label>Temperature <input id="temperature" type="range" min="-1" max="1" step="0.05" value="0.55"> <span class="note">cool ↔ warm</span></label>
+      <label>Tint <input id="tint" type="range" min="-1" max="1" step="0.05" value="0.25"> <span class="note">green ↔ magenta</span></label>
+      <label>Black level <input id="blackLevel" type="range" min="0" max="64" step="1" value="9"></label>
+      <div class="readout mono" id="tuneOut"></div>
     </fieldset>
 
     <fieldset>

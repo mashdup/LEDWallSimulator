@@ -76,7 +76,9 @@ let wallLayout = identity();
 let variantList = [...layoutVariants()];
 let variantIndex = 0;
 
-const budget = new PowerBudget(8000, { headroom: 0.1 });
+// The limit and headroom here are this wall's calibration; loadSettings()
+// re-reads them from the controls at boot, so the two stay in step.
+const budget = new PowerBudget(24000, { headroom: 0.1 });
 const peak = new PeakMeter(30);
 
 const banner = new Banner({ url: $('bannerUrl').value, intervalMs: Number($('pollMs').value), capRows: Number($('capRows').value) });
@@ -537,7 +539,8 @@ function report(k, ma) {
     $('powerOut'),
     `k ${k.toFixed(3)}${k < 1 ? ' (clamped)' : ''}\n` +
     `frame ${ma.toFixed(0)} mA · peak ${peak.windowPeak.toFixed(0)} mA · mean ${peak.windowMean.toFixed(0)} mA\n` +
-    `limit ${budget.effectiveLimitMa.toFixed(0)} mA · clamped frames ${budget.clampedFrames}`,
+    `limit ${budget.effectiveLimitMa.toFixed(0)} mA · clamped frames ${budget.clampedFrames}\n` +
+    `requested ${$('brightness').value} · headroom ${$('headroom').value}`,
     k < 1 ? 'warn' : '',
   );
   setOutput(
@@ -1216,6 +1219,81 @@ function mirrorContent(j) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// The wall's own calibration, persisted
+// ---------------------------------------------------------------------------
+
+/**
+ * The settings an operator dials once per WALL, not per session: the power
+ * budget the supply can take, and the LED fine-tune that corrects the diffuser
+ * and the beads' colour cast. They are properties of the hardware, so losing
+ * them on every reload - or every Ctrl+Shift+R - is the wrong default: the wall
+ * comes back dim and colour-cast until someone re-dials it.
+ *
+ * localStorage, not the server: this is one machine's view of one wall, and the
+ * page already keeps its owner token there. A malformed or absent entry falls
+ * back to the markup's own defaults, so a stale key can never wedge the page.
+ */
+const SETTINGS_KEY = 'wall.settings.v1';
+const SETTINGS_IDS = [
+  'limitMa', 'brightness', 'headroom',
+  'saturation', 'gamma', 'temperature', 'tint', 'blackLevel',
+];
+
+/**
+ * Restore saved values into the controls, clamped to each control's own range.
+ * With nothing saved the markup's own values stand - and those are this wall's
+ * calibration, so a fresh browser starts correct too.
+ */
+function loadSettings() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? 'null'); } catch { /* fall through */ }
+  if (saved !== null && typeof saved === 'object') {
+    for (const id of SETTINGS_IDS) {
+      const v = saved[id];
+      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+      const el = $(id);
+      // Clamp to the control's range: a hand-edited key must not be able to push
+      // the wall past what the slider itself would allow.
+      const min = Number(el.min);
+      const max = Number(el.max);
+      el.value = String(Math.min(max, Math.max(min, v)));
+    }
+  }
+  // The budget is constructed from a literal, not from the markup, so it has to
+  // be handed the controls' values whether or not anything was saved.
+  budget.limitMa = Number($('limitMa').value);
+  budget.headroom = Number($('headroom').value);
+  showTune();
+}
+
+/** Snapshot every control into localStorage, and refresh the readout. */
+function saveSettings() {
+  const out = {};
+  for (const id of SETTINGS_IDS) out[id] = Number($(id).value);
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(out)); } catch { /* private mode */ }
+  showTune();
+}
+
+/** The fine-tune values, which no range input shows on its own. */
+function showTune() {
+  setOutput(
+    $('tuneOut'),
+    `sat ${$('saturation').value} · gamma ${$('gamma').value} · ` +
+    `temp ${$('temperature').value} · tint ${$('tint').value} · ` +
+    `black ${$('blackLevel').value}`,
+  );
+}
+
+// `input`, not `change`: a drag that never ends (a reload mid-drag, a window
+// closed while the mouse is down) still keeps the last value, and the payload is
+// eight numbers.
+for (const id of SETTINGS_IDS) $(id).addEventListener('input', saveSettings);
+
+// Before the first frame, and before the auto-reconnect can send a meta: the
+// budget must carry the restored limit, not the markup's default.
+loadSettings();
 
 $('limitMa').addEventListener('change', () => {
   budget.limitMa = Number($('limitMa').value);
