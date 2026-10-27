@@ -61,6 +61,14 @@ const packed = new Uint8Array(RGB_BYTES);
 // look at. The wire carries `packed` raw, and so does the sim: the preview
 // shows the design at full brightness, and the clamp lives on the power line.
 const rendered = new Uint8Array(RGB_BYTES);
+// `packed` BEFORE the LED fine-tune: the design as the preview draws it.
+// Saturation and gamma configure the physical wall, not the picture, so the
+// preview must not show them (see draw()).
+const preview = new Uint8Array(RGB_BYTES);
+// A panel-shaped view of `packed`, so the power estimator reads the tuned bytes
+// that actually leave rather than the design. `packed` is a const reference, so
+// this view never needs rebuilding.
+const tunedView = { pixels: packed };
 const wire = new Uint8Array(FRAME_BYTES);
 
 let layout = new Layout();
@@ -412,20 +420,27 @@ function tick() {
     else panel.clear();
   }
 
-  // Colour before the power clamp: the estimator must see the bytes that actually
-  // leave. Saturation pulls each pixel away from its own mean, which is what
-  // rescues a pastel that the diffuser and a bright wall would otherwise wash
-  // to white. The preview draws these same un-scaled bytes (see draw()).
-  applyColor(panel.pixels, {
+  // Pack the design into wire order first. Saturation and gamma are per-pixel
+  // operations, so applying them AFTER this permutation is identical to applying
+  // them in logical order — and packing first is what lets the preview keep the
+  // untouched design.
+  packInto(panel, layout, packed);
+  preview.set(packed);
+
+  // The LED fine-tune. These configure the PHYSICAL wall, not the picture:
+  // saturation pulls each pixel away from its own mean (what rescues a pastel
+  // that the diffuser and a bright wall would otherwise wash to white) and gamma
+  // is the final encode. They land on the bytes that leave and NOT on the
+  // preview, which draws `preview` above (see draw()).
+  applyColor(packed, {
     saturation: Number($('saturation').value),
     gamma: Number($('gamma').value),
   });
 
   // Power clamp next: the multiplier is decided from the frame we just drew, so a
-  // bright frame is dimmed before it ever reaches the wall.
-
-  const k = budget.brightnessFor(panel, Number($('brightness').value));
-  packInto(panel, layout, packed);
+  // bright frame is dimmed before it ever reaches the wall. The estimator reads
+  // the tuned bytes, because those are what the wall actually draws.
+  const k = budget.brightnessFor(tunedView, Number($('brightness').value));
   // Brightness is applied ONCE, at the sink: the sketch folds the meta
   // brightness into renderWall(), and the DDP transport applies it to the
   // frames that follow. Scaling the wire bytes here as well made the wall
@@ -500,7 +515,11 @@ function draw() {
   // power system, not of the content, and a preview that dimmed with it reads
   // as the picture changing when only the budget moved. k and the mA readouts
   // live on the power line, which is where a clamp is visible on purpose.
-  sim.drawWall(packed, wallView ? wallLayout : layout);
+  //
+  // It draws `preview`, not `packed`: the saturation and gamma sliders are the
+  // LED fine-tune, a property of the physical wall, so the design on screen must
+  // not move when they do.
+  sim.drawWall(preview, wallView ? wallLayout : layout);
   sim.setOverlay($('overlay').checked);
 }
 
