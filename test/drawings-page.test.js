@@ -136,10 +136,10 @@ test('the gallery cycles the saved drawings, driven by the server clock', async 
   let proc = null;
 
   try {
-    // Entries exist BEFORE the gallery starts: the list is fetched on entry,
-    // and the cycle position is floor(serverTime / interval) % n, so a page
-    // that loads mid-cycle lands on the same drawing as one that has been
-    // open all along.
+    // Entries exist BEFORE the gallery starts: the first read of the store
+    // anchors the cursor, and every renderer reads the same cursor off the
+    // /content poll - so a page that loads mid-slot lands on the same drawing
+    // as one that has been open all along.
     const red = await postJson(`${serve.base}/drawings`, { name: 'red', pixels: pixelsToHex(solid([255, 0, 0])) });
     const blue = await postJson(`${serve.base}/drawings`, { name: 'blue', pixels: pixelsToHex(solid([0, 0, 255])) });
     assert.ok(red.ok && blue.ok);
@@ -173,12 +173,13 @@ test('the gallery cycles the saved drawings, driven by the server clock', async 
     assert.deepEqual([...seen].sort(), ['blue', 'red'], 'the gallery must show every saved drawing in turn');
 
     // The status names the entry: a wall that cycles silently is a wall
-    // nobody can explain.
+    // nobody can explain. The label is the schedule's, read from the server's
+    // cursor: the drawing's name and how many the wall is cycling.
     const status = await waitFor(async () => {
       const t = await cdp.eval(tab, 'document.getElementById("status").textContent').catch(() => '');
-      return /gallery 1\/2|gallery 2\/2/.test(t) ? t : null;
+      return /gallery (red|blue) · 2 drawings/.test(t) ? t : null;
     }, 10_000);
-    assert.match(status, /gallery [12]\/2 · (red|blue)/);
+    assert.match(status, /gallery (red|blue) · 2 drawings/);
 
     // An empty gallery is a black wall, not a crash: delete everything and
     // the renderer must keep serving frames. The owner token is what opens a

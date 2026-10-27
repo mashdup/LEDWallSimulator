@@ -6,7 +6,8 @@
  * the whole contract, and it is what makes a transition safe in this
  * architecture: the wall's frame is a pure function of the shared server
  * clock, so the progress of a wipe is not an animation anyone starts - it is
- * arithmetic on the same clock that picks the drawing (see gallerySlot). A
+ * arithmetic on the same clock that places the slot (see galleryTiming; which
+ * drawing the slot shows is the server's cursor, see DrawingStore.gallery). A
  * capture browser that loads mid-wipe, a phone tab, and the app tab that
  * drives the frames all compute the same k and land on the same half-wiped
  * frame.

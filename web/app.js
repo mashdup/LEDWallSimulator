@@ -44,8 +44,7 @@ import { PageSource } from './page.js';
 import { openSink, SINK_KINDS, CHANNEL } from './sinks.js';
 import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
-import { ANIM_NAMES, makeMessage, gallerySlot, galleryNextMeta, GAP_ANIM_NAMES, TRANSITION_NAMES, GALLERY_DEFAULTS } from '../core/content-protocol.js';
-import { applyTransition } from '../core/transitions.js';
+import { ANIM_NAMES, makeMessage, galleryFrame, GAP_ANIM_NAMES, TRANSITION_NAMES, GALLERY_DEFAULTS } from '../core/content-protocol.js';
 import { animFrame } from '../core/animations.js';
 
 const $ = (id) => document.getElementById(id);
@@ -808,34 +807,18 @@ let cLocalAt = performance.now();
 let cScroller = null;
 let cPassMs = 0;
 let cPushing = false;
+// The gallery's schedule, as the server answered it: {cur, prev, next, slotStart,
+// period, count}. Read on every /content poll. See DrawingStore.gallery().
+let cSched = null;
 
-// The gallery, app-side. The entries live on the server (GET /drawings) and
-// which one is showing is floor(serverTime / interval) % n - the same pure
-// arithmetic content.html uses, so this tab, a content tab, and a page loaded
-// mid-cycle all land on the same drawing. animFrame cannot resolve it (this
-// module never fetches), and its default branch is the demo: left alone, a
-// driver in gallery mode plays confetti where a family drawing belongs.
-const cGallery = { metas: [], fetchedAt: 0, cache: new Map(), inflight: null, pending: new Set() };
-
-function cGalleryRefresh(force = false) {
-  if (cGallery.inflight !== null) return cGallery.inflight;
-  if (!force && Date.now() - cGallery.fetchedAt < 2000) return Promise.resolve();
-  cGallery.inflight = fetch('/drawings', { cache: 'no-store' })
-    .then((r) => (r.ok ? r.json() : []))
-    .then((metas) => {
-      cGallery.metas = Array.isArray(metas) ? metas : [];
-      cGallery.fetchedAt = Date.now();
-      // The count is written where the number is learned. Mirroring it only on
-      // a content rev change would show "0 drawings" forever: the list arrives
-      // a moment after the state that asks for it, and the state does not
-      // change again.
-      renderGalleryCount();
-    }, () => {
-      // Server down: keep cycling the list we already have.
-    })
-    .then(() => { cGallery.inflight = null; });
-  return cGallery.inflight;
-}
+// The gallery, app-side. WHICH drawing this slot shows is the server's answer
+// (`cSched`, read off the same /content poll as the state) - not arithmetic on
+// the roster. This tab, a content tab and the capture browser all read the one
+// cursor, so they cannot disagree, and a guest adding or pruning a drawing moves
+// nothing that is already on screen. animFrame cannot resolve a drawing (this
+// module never fetches), and its default branch is the demo: left alone, a driver
+// in gallery mode plays confetti where a family drawing belongs.
+const cGallery = { cache: new Map(), pending: new Set() };
 
 function cGalleryFetch(id) {
   if (cGallery.cache.has(id) || cGallery.pending.has(id)) return;
@@ -851,42 +834,26 @@ function cGalleryFetch(id) {
 }
 
 /**
- * The flat RGB bytes of one slot: a drawing off the wire, a break animation,
- * or dark. From the pure generator, so the transition blends two frames of the
- * same origin, and this tab and a content tab compose identical bytes.
+ * The bytes to push this tick, from core's galleryFrame.
+ *
+ * The frame builder is shared with content.html for the same reason animFrame is:
+ * a gallery composed twice is a gallery that can drift, and the two renderers must
+ * post identical bytes. The pic supplier answers from this tab's cache and starts
+ * a fetch on a miss, returning dark for the one frame until it lands.
  */
-function cSlotBytes(slot, tSec) {
-  if (slot.anim !== null) return animFrame({ kind: 'anim', name: slot.anim }, tSec);
-  if (slot.drawing < 0) return new Uint8Array(20 * 20 * 3);
-  const meta = cGallery.metas[slot.drawing];
-  const hex = cGallery.cache.get(meta.id);
-  if (hex === undefined) {
-    cGalleryFetch(meta.id);
-    return new Uint8Array(20 * 20 * 3); // dark this tick; the pixels land on the next one
-  }
-  return animFrame({ kind: 'pic', pixels: hex }, tSec);
-}
-
-/** The bytes to push this tick: the slot, plus the transition into it. */
 function cGalleryBytes(tSec) {
-  cGalleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
-  // The metas ARRAY, not its length: gallerySlot freezes the rotation's list
-  // length at each slot boundary, so a guest drawing submitted mid-slot joins at
-  // the next boundary instead of moving every boundary and skipping the show.
-  const slot = gallerySlot(tSec, cGallery.metas,
-    cState.interval ?? 5, cState.gap ?? 0, cState.gapAnim ?? 'none', cState.transitionSec ?? 0);
-  // Warm the cache for the drawing the NEXT slot shows, while this one is up: a
-  // new submission becomes eligible at the next boundary, and fetching its pixels
-  // only then opens that boundary on a dark frame. Shares slotFor with the
-  // scheduler, so it cannot name a different drawing.
-  const next = galleryNextMeta(cGallery.metas, tSec, cState.interval ?? 5, cState.gap ?? 0);
-  if (next !== null && !cGallery.cache.has(next.id)) cGalleryFetch(next.id);
-  const to = cSlotBytes(slot, tSec);
-  // The transition is a slot boundary, not a timer: k comes from the same
-  // clock arithmetic that picked the slot, so a page that loads mid-wipe is
-  // mid-wipe, and the capture browser and this driver agree on the frame.
-  if (slot.from === null) return to;
-  return applyTransition(cState.transition ?? 'none', cSlotBytes(slot.from, tSec), to, slot.k);
+  if (cSched === null) return new Uint8Array(20 * 20 * 3);
+  return galleryFrame(tSec, cSched, cState, {
+    pic: (id, time) => {
+      const hex = cGallery.cache.get(id);
+      if (hex === undefined) {
+        cGalleryFetch(id);
+        return new Uint8Array(20 * 20 * 3);
+      }
+      return animFrame({ kind: 'pic', pixels: hex }, time);
+    },
+    anim: (name, time) => animFrame({ kind: 'anim', name }, time),
+  });
 }
 
 async function pollContent() {
@@ -896,13 +863,15 @@ async function pollContent() {
     const j = await r.json();
     cServerAt = j.at;
     cLocalAt = performance.now();
+    // Read on EVERY poll, not only on a rev change: the gallery's schedule is a
+    // cursor that moves with the clock, so updating it with the state would hold
+    // one slot forever. It is the same response that carries the state.
+    cSched = j.gallery ?? null;
+    renderGalleryCount();
     if (j.rev !== cRev) {
       cRev = j.rev;
       cState = j.state;
       cScroller = null;
-      // Entering the gallery: pull the list now, do not wait out the 2 s
-      // refresh window, so the first drawing shows within one poll.
-      if (j.state.kind === 'gallery') cGalleryRefresh(true);
       if (j.state.kind === 'text') {
         const src = new Banner({ fallback: j.state.text, color: j.state.color ?? '#ffffff' });
         cScroller = new Scroller({
@@ -1153,9 +1122,22 @@ for (const name of ANIM_NAMES) {
 // driving the frames) lands in the same slot. The selects are built from the
 // lists the protocol gate validates, so the console can never offer a value the
 // wall would refuse.
-/** The gallery's own number, in the console. Written where it is learned. */
+/**
+ * The gallery's own number, in the console.
+ *
+ * Read from the schedule, not from a list this tab fetched: the server already
+ * answers the count with the cursor, so the console needs no second polling loop
+ * and cannot show a number the wall is not cycling. Null until the first poll
+ * lands, and outside the gallery the schedule is absent, so the line goes quiet
+ * rather than claiming zero.
+ */
 function renderGalleryCount() {
-  setOutput($('galCount'), `${cGallery.metas.length} drawings`);
+  if (cSched === null) {
+    setOutput($('galCount'), '');
+    return;
+  }
+  setOutput($('galCount'), `${cSched.count} drawings` +
+    (cSched.cur === null ? ' · slot skipped' : ` · showing ${cSched.cur.name}`));
 }
 
 const galGapAnim = $('galGapAnim');
@@ -1217,15 +1199,10 @@ function mirrorContent(j) {
     galTrans.value = TRANSITION_NAMES.includes(s.transition) ? s.transition : 'none';
     $('galTransSec').value = String(s.transitionSec ?? 0);
   }
-  // The count is the one thing about the gallery the app does not already
-  // know: the entries live on the server, and the list arrives with the cycle.
-  // Only while the wall is IN the gallery - the list is the gallery's data, and
-  // a console that polls it in every mode is a second polling loop nobody asked
-  // for.
-  if (s.kind === 'gallery') {
-    renderGalleryCount();
-    if (cGallery.metas.length === 0) cGalleryRefresh(true);
-  }
+  // The count and the current name are written from the schedule on every poll
+  // (see pollContent), not here: this runs on a rev change, and the cursor moves
+  // with the clock, so mirroring it only on a command would freeze the line at
+  // whatever the last command said.
 }
 
 

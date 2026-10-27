@@ -296,7 +296,15 @@ function handleContentGet(req, res) {
   // the last command - a sawtooth clock, seen as animation that constantly
   // restarts. The POST time stays in the body as postedAt for reference.
   respond(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-    JSON.stringify({...content, at: Date.now()}));
+    JSON.stringify({
+      ...content,
+      at: Date.now(),
+      // The store's cursor answer: which drawing this slot shows, remembered
+      // rather than derived from the roster (see DrawingStore.gallery). It rides
+      // this poll because every renderer already asks /content at ~100 ms, so a
+      // schedule costs no extra request and no second clock to keep honest.
+      gallery: drawings.schedule(content.state),
+    }));
 }
 
 async function handleContentPost(req, res) {

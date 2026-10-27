@@ -60,9 +60,8 @@ import { createClock } from './worker-clock.js';
 import { startKeepAlive } from './keep-alive.js';
 import { Panel, Scroller } from '../core/index.js';
 import { GRID, pixelsFromHex } from '../core/drawings.js';
-import { gallerySlot, galleryNextMeta } from '../core/content-protocol.js';
+import { galleryFrame, galleryTiming } from '../core/content-protocol.js';
 import { animFrame } from '../core/animations.js';
-import { applyTransition } from '../core/transitions.js';
 import { Banner } from './banner.js';
 /*
  * WALL — the drawing API for this page's canvas, sized to the panel.
@@ -116,6 +115,12 @@ let state = { v: 1, kind: 'demo' };
 let rev = -1;
 let serverAt = Date.now();
 let localAt = performance.now();
+/* The gallery's schedule, as the server answered it: which drawing this slot
+ * shows, what it replaced, what is next, and when the slot opened. The server
+ * REMEMBERS this; it is not derived from the roster here, because a rotation
+ * computed from a list index moves whenever a guest adds or prunes a drawing -
+ * which is what a party does constantly. See DrawingStore.gallery(). */
+let sched = null;
 
 function serverNow() {
   // Server time extrapolated by the local monotonic clock between polls:
@@ -130,6 +135,10 @@ async function poll() {
     const j = await r.json();
     serverAt = j.at;
     localAt = performance.now();
+    // The schedule is read on EVERY poll, not only when rev changes: it is the
+    // gallery's cursor, and it moves with the clock, not with a command. A
+    // renderer that only updated it on a state change would hold one slot forever.
+    sched = j.gallery ?? null;
     if (j.rev !== rev) {
       rev = j.rev;
       state = j.state;
@@ -165,9 +174,10 @@ function onState() {
     });
     passMs = scroller.passDurationMs(30);
   }
-  // Entering the gallery: pull the list now, do not wait out the 2 s refresh
-  // window, so the first drawing appears within one poll of the command.
-  if (state.kind === 'gallery') galleryRefresh(true);
+  // Entering the gallery needs no fetch and no re-poll: the schedule came back
+  // in the SAME response as the state that asks for it (both are read off one
+  // `content` object), and galleryFrame prefetches the drawing due next while
+  // this one is up.
   setOutput(describe());
 }
 
@@ -323,84 +333,45 @@ function paintPixels(hex) {
   }
 }
 
-// The gallery: the entries live on the server (GET /drawings), and WHICH
-// one is showing is a pure function of the shared server clock (gallerySlot,
-// in core) - so the wall, a human's tab, and a capture browser that loads
-// fresh mid-cycle all land on the same drawing, and on the same break between
-// drawings. The cache is by id, so a new entry never shifts the pixels an id
-// maps to.
-const gallery = { metas: [], fetchedAt: 0, cache: new Map(), inflight: null, pending: new Set(), label: '' };
-
-async function galleryRefresh(force = false) {
-  if (gallery.inflight !== null) return gallery.inflight;
-  if (!force && Date.now() - gallery.fetchedAt < 2000) return;
-  gallery.inflight = fetch('/drawings', { cache: 'no-store' })
-    .then((r) => (r.ok ? r.json() : []))
-    .then((metas) => {
-      // As served: DrawingStore.metas() returns the list in createdAt order, the
-      // one order the per-slot frozen rotation is valid against. Not re-sorted
-      // here - a second copy of that rule is a second thing that can drift.
-      gallery.metas = Array.isArray(metas) ? metas : [];
-      gallery.fetchedAt = Date.now();
-    }, () => {
-      // Server down: keep cycling the list we already have.
-    })
-    .then(() => { gallery.inflight = null; });
-  return gallery.inflight;
-}
-
-function gallerySlotNow(t) {
-  // The metas ARRAY, not its length: the scheduler freezes the list length at
-  // each slot boundary, so a guest drawing submitted mid-slot joins the rotation
-  // at the next one instead of moving every boundary and skipping the show.
-  return gallerySlot(t, gallery.metas, state.interval ?? 5, state.gap ?? 0,
-    state.gapAnim ?? 'none', state.transitionSec ?? 0);
-}
+// The gallery: the server says WHICH drawing this slot shows (see `sched`), and
+// this page supplies the pixels and the clock. The cache is keyed by id, so a new
+// entry never shifts the bytes an id maps to, and an id that is no longer in the
+// roster simply has no bytes - which the frame builder already treats as a hole.
+const gallery = { cache: new Map(), pending: new Set(), label: '' };
 
 /**
- * The flat RGB bytes of one slot: a drawing off the wire, a break animation,
- * or dark. From core, in this renderer as in the app tab - the gallery is
- * composed from the pure generator in BOTH renderers, so the capture browser
- * and the frame driver cannot drift, and a transition has two frames of the
- * same origin to blend.
+ * The bytes of this slot, blended through its transition, from core.
+ *
+ * Both renderers call the same galleryFrame for the same reason they call the
+ * same animFrame: the gallery composed twice is a gallery that can drift. The
+ * pic supplier answers from this page's cache and starts a fetch on a miss,
+ * returning dark for the one frame until it lands - the schedule then advances
+ * and the next fetch has already been kicked off by galleryFrame's prefetch.
  */
-function slotBytes(slot, t) {
-  if (slot.anim !== null) return animFrame({ kind: 'anim', name: slot.anim }, t);
-  if (slot.drawing < 0) return new Uint8Array(GRID * GRID * 3);
-  const meta = gallery.metas[slot.drawing];
-  const hex = gallery.cache.get(meta.id);
-  if (hex === undefined) {
-    galleryFetch(meta.id);
-    return new Uint8Array(GRID * GRID * 3); // dark this tick; the pixels land on the next one
-  }
-  return animFrame({ kind: 'pic', pixels: hex }, t);
+function galleryBytes(t) {
+  return galleryFrame(t, sched, state, {
+    pic: (id, time) => {
+      const hex = gallery.cache.get(id);
+      if (hex === undefined) {
+        galleryFetch(id);
+        return new Uint8Array(GRID * GRID * 3);
+      }
+      return animFrame({ kind: 'pic', pixels: hex }, time);
+    },
+    anim: (name, time) => animFrame({ kind: 'anim', name }, time),
+  });
 }
 
 function galleryDraw(t) {
-  galleryRefresh(); // self-throttled: one list fetch per 2 s, one in flight
-  const slot = gallerySlotNow(t);
-  // Warm the cache for the drawing the NEXT slot will show, while this one is
-  // up. A submission becomes eligible at the next boundary; if its pixels are
-  // only fetched then, the boundary opens on a dark frame. slotFor is shared
-  // with the scheduler, so this can never name a different drawing.
-  const next = galleryNextMeta(gallery.metas, t, state.interval ?? 5, state.gap ?? 0);
-  if (next !== null && !gallery.cache.has(next.id)) galleryFetch(next.id);
-  let bytes = slotBytes(slot, t);
-  // The transition into this slot: the previous slot's frame, at the SAME
-  // clock, blended by the same k every other renderer computes. The animation
-  // keeps running through the blend (its frame is taken at t, not at the slot
-  // boundary), so a wipe into a break animation is a wipe of a moving picture.
-  if (slot.from !== null) {
-    bytes = applyTransition(state.transition ?? 'none', slotBytes(slot.from, t), bytes, slot.k);
-  }
-  paintBytes(bytes);
+  if (sched === null) return; // first poll has not landed yet: hold the last frame
+  paintBytes(galleryBytes(t));
 
-  const label = slot.drawing >= 0
-    ? `gallery ${slot.drawing + 1}/${gallery.metas.length}${gallery.metas[slot.drawing]?.name
-      ? ' · ' + gallery.metas[slot.drawing].name : ''}`
-    : slot.anim !== null
-      ? `gallery break · ${slot.anim}`
-      : gallery.metas.length === 0 ? 'gallery: empty' : 'gallery break · dark';
+  const tm = galleryTiming(t, sched.slotStart, sched.period, state);
+  const label = tm.kind === 'drawing'
+    ? `gallery ${sched.cur ? sched.cur.name : '(skipped)'} · ${sched.count} drawing${sched.count === 1 ? '' : 's'}`
+    : tm.anim !== null
+      ? `gallery break · ${tm.anim}`
+      : sched.count === 0 ? 'gallery: empty' : 'gallery break · dark';
   if (label !== gallery.label) {
     gallery.label = label;
     setOutput(label);

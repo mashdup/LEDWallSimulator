@@ -172,7 +172,7 @@ async function consoleApi(req, res, url, path) {
     // `at` is the CURRENT time, not the last POST: renderers rebase their clock
     // on every poll, so a POST-time `at` would snap every animation back to the
     // moment of the last command - a sawtooth clock.
-    json(res, 200, { ...content, at: Date.now() });
+    json(res, 200, { ...content, at: Date.now(), gallery: store.schedule(content.state) });
     return true;
   }
 
