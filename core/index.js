@@ -80,3 +80,32 @@ export {
   calibrationPattern,
   calibrationPhysicalBytes,
 } from './calibration.js';
+
+/* The baked-show format. Pure, like everything else here — no fs, no DOM — so the
+ * browser can read a `.ledshow` it fetched and the baker writes with the same
+ * code the firmware mirrors. Nothing in the console uses it yet; it is exported
+ * so an in-page bake has something to import rather than a fourth copy of the
+ * header offsets. */
+export {
+  SHOW_MAGIC,
+  SHOW_MAGIC_STR,
+  SHOW_VERSION,
+  SHOW_OFF,
+  SHOW_HEADER_BYTES,
+  SHOW_CRC_BYTES,
+  SHOW_FRAME_BYTES,
+  SHOW_FRAME_OFFSET,
+  SHOW_FLAG_TUNED,
+  SHOW_DEFAULTS,
+  TRANSITION_CODES,
+  TRANSITION_NAMES_BAKED,
+  crc32,
+  calibrationFingerprint,
+  showBytes,
+  parseShow,
+  describeShow,
+  showPeriodMs,
+  showBlendMs,
+  showTiming,
+  showFrameAt,
+} from './showfile.js';

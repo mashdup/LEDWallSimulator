@@ -85,8 +85,16 @@ export const MAX_REWINDS = 8;
 /** Mirrors firmware's `enum RxState`, because the status line reports it as a number. */
 export const RX = Object.freeze({ IDLE: 0, SEQ: 1, RGB: 2, END: 3, META: 4 });
 
-/** Mirrors firmware's `enum WallState`. */
-export const WALL = Object.freeze({ DARK: 0, LIVE: 1, FADING: 2 });
+/** Mirrors firmware's `enum WallState`.
+ *
+ * LOCAL is the baked-show player (firmware PLAYER=1). This file models the SINK
+ * — the decoder, the watchdog and the power guard — and does NOT model the
+ * player: there is no LittleFS, no upload and no blend in a VirtualWall, and
+ * inventing a second implementation of them in JS would be exactly the "two
+ * copies of the same maths" this project keeps avoiding. The player's arithmetic
+ * has a reference renderer of its own in core/showfile.js (`showTiming`,
+ * `showFrameAt`), which is what the firmware's three integer lines are pinned to. */
+export const WALL = Object.freeze({ DARK: 0, LIVE: 1, FADING: 2, LOCAL: 3 });
 
 /** Self-test pattern names exactly as the firmware prints them, indexed like CALIBRATION_PATTERNS. */
 export const SELFTEST_NAMES = Object.freeze(['ALL_RED', 'COLUMN_SWEEP', 'WALK', 'INDEX_MAP']);
@@ -661,6 +669,19 @@ export function parseStatusLine(line) {
       // Only the WLED rig can see a refresh in flight; the sketch has no such field.
       case 'torn': out.torn = Number(value); break;
       case 'stale': out.stale = Number(value); break;
+      /* ---- the baked-show player (firmware PLAYER=1) ------------------------
+       * A SINK-only build prints none of these, so a driver must treat every one
+       * as optional. `drawings=`, not `n=`: a one-letter key in a line that two
+       * different rigs print is exactly how a parser acquires a silent
+       * mis-reading, and `n` is the sort of thing a future field would like. */
+      case 'show': out.showPresent = Number(value); break;
+      case 'drawings': out.showCount = Number(value); break;
+      case 'fp': out.fingerprint = Number(value); break;
+      case 'worst': out.showWorstMa = Number(value.replace(/mA$/, '')); break;
+      case 'local': out.localFrames = Number(value); break;
+      case 'seams': out.seams = Number(value); break;
+      case 'falls': out.localFalls = Number(value); break;
+      case 'sb': out.standbyStarts = Number(value); break;
       default: break;
     }
   }

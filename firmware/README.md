@@ -247,6 +247,16 @@ silence left `state=live` and `stale=0`, holding the last frame.
 Keep the fade for the calibration pass, where a silent stream *should* be
 obvious, and for anything driving the wall from a machine that might die.
 
+**What happens at the END of the fade is a decision, and the default is still to
+go dark.** That is deliberate: a black wall is the honest report that the tether
+is dead, and an operator standing in front of it can see that something needs
+plugging in. `-D LOCAL_FALLBACK_MS=<n>` instead starts the baked show once the
+stream has been silent for `n` ms — the setting for a party, not for a
+calibration pass. It is never on by default, because a wall that silently
+switches to last month's gallery while a stream is broken is a wall that lies
+about the one fault this watchdog exists to make visible. See "The player"
+below.
+
 ---
 
 ## Power guard
@@ -414,11 +424,217 @@ wall seq=137 br=85/85 est=4210mA cap=8000mA limit=8000mA state=live rx=0
 frames=412 meta=3 disc=1 resync=20 rewind=1 gaps=0 stale=0
 ```
 
+A `-D PLAYER=1` build adds, after `stale=`:
+
+```
+show=1 drawings=12 fp=1981689680 worst=4100mA local=412 seams=34 falls=0
+```
+
+`show=` says a validated show is on flash, `drawings=` how many, `fp=` the
+calibration fingerprint, `worst=` the worst-frame current the bake computed,
+`local=` frames painted from the show, `seams=` slot boundaries crossed, and
+`falls=` streams that died and handed the wall to the player. `state=local` is
+the fourth wall state; see "The player" below.
+
 `rewind=` is the number of discarded records that were rescanned and replayed —
 the recovery counter for the rescan path above. During the calibration pass,
 watch `disc`/`rewind`/`gaps` together: `rewind` climbing with `disc` means the
 serial link is dropping bytes; `gaps` climbing with `disc == 0` means the browser
 is dropping frames before it sends them.
+
+---
+
+
+## The standby: an idle wall that is alive (`-D STANDBY`, on by default)
+
+The baked show is the wall's *last show, held*. The standby is the cheaper thing
+underneath it and for most evenings the right one: **an animation that lives in
+the firmware.** No host, no filesystem, no bake, no format — it works on a board
+with a blank flash, and there is nothing in it that can go stale.
+
+```
+standby: ember
+wall seq=0 br=85/85 est=306mA cap=8000mA limit=8000mA state=standby rx=0 frames=0
+meta=0 disc=0 resync=0 rewind=0 gaps=0 stale=0 show=0 drawings=0 fp=0 worst=0mA
+local=0 seams=0 falls=0 sb=1 ...
+```
+
+| `-D STANDBY=` | |
+| --- | --- |
+| `0` | off — the wall goes dark when idle, which is what a calibration pass wants |
+| `1` | **ember** — a slow amber fire, cooler toward the top (default) |
+| `2` | drift — soft blue-to-violet bands sliding sideways |
+| `3` | breathe — one warm radial gradient on an 8 s cycle, the calmest |
+| `4` | cycle — each of the three, `STANDBY_CYCLE_SEC` at a time |
+
+Three things worth knowing, because each is a decision:
+
+- **It is not `core/animations.js`.** Those are the content library and they stay
+  the host's — a C++ copy of `fire` would be a second answer to what the wall is
+  showing, and the two would drift apart. Standby art should read as *idling*, so
+  being calmer than any content is the point.
+- **It paints in physical LED order**, since the firmware has no layout map: LED
+  `i` is column `i/20`, row `i%20`, which is this panel's measured wiring.
+  Re-measured wiring makes the standby mirrored or rotated — cosmetic, and only
+  for the standby. Content is packed host-side by the real layout.
+- **It runs dimmer than content** (`STANDBY_LEVEL`, 160/255) because an idle wall
+  may be on all night with nobody watching; 400 beads at content brightness is
+  heat, power and LED hours spent on nothing. Measured ~270–350 mA for `ember` at
+  85/255, and `est=` in the status line reports *that*, not the last stream's.
+
+Precedence is one rule, the same at boot and at the end of a dead stream: **the
+baked show wins if one is on flash; the standby is what is always available.**
+
+---
+
+## The player (baked shows, `-D PLAYER=1`)
+
+**A wall with nothing attached still has to be a wall.** The brain is a laptop,
+and a laptop closes its lid — so the sketch can play a *baked show*: a header and
+N flat frames in LittleFS, in the same 1200-byte wire order the decoder already
+speaks. It is not a renderer. The host does all of the rendering at bake time
+(`animFrame` → `packInto` → `applyColor`, the same three calls `web/app.js` makes)
+and the device seeks a frame, blends it with one other frame, and clocks it out.
+`plan.md` §9 is the reasoning; `core/showfile.js` is the format.
+
+| flag | default | what it does |
+| --- | --- | --- |
+| `-D PLAYER=0` | `1` | build the old sink-only sketch. No filesystem, no player |
+| `-D LOCAL_BOOT=0` | `1` | do not auto-play at boot |
+| `-D LOCAL_FALLBACK_MS=<n>` | `0` | hand the wall to the idle animation `n` ms after the last complete frame, instead of going dark |
+| `-D SHOW_CHUNK_MAX=1024` | `1024` | largest upload chunk payload |
+| `-D NVS_MIN_MS=10000` | `10000` | throttle on persisting brightness/limit to NVS |
+
+
+### Boot
+
+```
+fs: littlefs mounted
+nvs: br=180 limit=9000mA (restored)
+show: 12 drawings, 8s + 5s break, fade 1000ms, 180/255, 9000mA limit, worst 4100mA, fp 1981689680, tuned=1, 14444B
+local: playing 12 drawings
+```
+
+No show on flash:
+
+```
+local: no show on flash (tools/bake.js --upload puts one there)
+```
+
+`show: refused (...)` means the file failed the magic/version/length/crc gate;
+`fs: unavailable, the player is off` means LittleFS would not mount even after a
+format attempt, and the sketch is a sink again.
+
+**The wall goes dark between drawings** — a baked show carries no gap animation,
+so the `gap` in its cadence is a black break with a fade out of and into it. Set
+`--gap 0` when baking to blend drawing-to-drawing instead.
+
+### Uploading
+
+The show arrives on the cable that is already there. Two records share the byte
+stream with the frames and are told apart by magic, so no separate mode exists:
+
+```
+chunk  : 0xA3 | seq u8 | offset u32 LE | len u16 LE | payload[len] | 0x5B
+commit : 0xA2 | size u32 LE | crc32 u32 LE | 0x5B
+```
+
+`offset` must be exactly how many bytes have already been written. A record lost
+in the cable is therefore a **refusal**, not a hole — a hole would leave a file
+with a valid length, a valid crc over what was written, and a silent gap in a
+drawing, and every check would pass. `crc32` in the commit record covers the
+whole file as sent; the device has been accumulating it while writing.
+
+**Every accepted chunk is acknowledged, and that is flow control, not a progress
+bar.** The wall prints `upload: chunk <bytes-written>` after the flash write, and
+`tools/bake.js` waits for that exact line before sending the next chunk. Without
+it the host overruns the device: a flash write takes milliseconds and a 921600
+UART fills the 4 KB ring in ~44 ms, so the bytes of the next chunk arrive while
+the wall is inside LittleFS and the tail byte is lost. Measured — the same 6 KB
+show aborted on every unpaced attempt, and landed first try at 60 ms per chunk.
+Letting the wall set the pace makes the upload exactly as fast as its flash, and
+turns a lost record into a specific error at the chunk that was lost instead of a
+twenty-second silence at commit time. Every abort also names its reason
+(`upload: aborted bad record tail`, `... chunk offset is not where the file
+ends`), because a silent abandon is what made this take an afternoon.
+
+Nothing touches `/show.led` until the commit record verifies. Then:
+
+```
+upload: 12288/14444 B
+upload: ok 14444B
+show: 12 drawings, ...
+```
+
+Refusals are loud, and all of them leave the live show playing:
+
+```
+upload: refused (size 14444/14444 crc 3735928559/3735928559)
+upload: refused (not a show this firmware can play)
+upload: refused (cannot put the live show aside)
+```
+
+### Reading it off the status line
+
+`state=local` is the fourth wall state. `show=1` a validated show is on flash,
+`drawings=12` how many, `fp=` the calibration fingerprint, `worst=` the
+worst-frame current the bake computed, `local=` frames painted from the show,
+`seams=` slot boundaries crossed, `falls=` streams that died and handed the wall
+to the player, `sb=` times the standby took it. A `-D PLAYER=0` build prints none
+of them.
+
+`state=standby` is the fifth wall state, and `sb=` is the only evidence a driver
+has that the animation is *running*: a still ember and a hung loop look identical
+from the serial port, so `sb=1` plus an `est=` that keeps changing is what says
+the idle wall is alive.
+
+`fp` is the one to look at after re-measuring the wiring. The device cannot
+recompute it — it has no layout map and runs no colour maths — so it only
+*reports* it. Compare it with the console's: a mismatch means the show was baked
+against a different layout or a different LED fine-tune, and the frames are
+addressed to the wrong beads or tuned for the wrong wall. Re-bake.
+
+### Two things that are not what they look like
+
+- **The show is in physical LED order.** So a re-measured `snake`/`flip`/
+  `transpose` flag does not make a baked show look colour-cast, it makes it look
+  *scrambled*. Nothing on the wall can fix that; `tools/bake.js` again.
+- **`worst=` over `limit=` means the wall will clamp itself.** The bake warns at
+  the keyboard, and the boot applies `maxBrightnessForLimit` as always, so an
+  over-budget show runs dimmer than baked rather than browning out the supply.
+
+### Verified on the panel (2026-10-28)
+
+ESP32-S3 DevKitC-1, COM8 (CH343 bridge) at 921600, flashed
+`-DSTALE_MS=1500 -DLOCAL_FALLBACK_MS=15000` with `CDCOnBoot=default`. Every line
+below was read off the port, not inferred.
+
+| check | observed |
+|:------|:---------|
+| boot banner | `fs: littlefs mounted` / `nvs: br=255 limit=8000mA (nothing saved) -> br=85/255 after the guard` / `show: 5 drawings, 8s + 5s break, fade 1000ms, 255/255, 8000mA limit, worst 11449mA, fp 1981689680, tuned=0, 6044B` / `local: playing 5 drawings` |
+| boot autoplay | first status line after reset is `state=local ... show=1 drawings=5`, and `local=` climbs as the opening fade runs |
+| upload | `--upload` paced by the per-chunk ack: `upload: ok 6044B`, then the banner re-announces the new show |
+| host re-take | streaming into a `state=local` wall prints `local: stopped` and the next status line is `state=live` |
+| **failover** | stream stops: `state=live` → `state=fading` (`stale=1`, ~1.5 s) → `state=dark` → **15 s after the last frame** `state=local`, `falls=1` |
+| **gallery runs** | `seams=1` a slot later, `local=` climbing through each seam — the wall cycles the baked drawings with nobody attached |
+
+Two bugs this pass found, both caught by reading the port rather than by a test:
+
+1. **`LIMIT_READ_NONE` is not a sentinel.** `Preferences::getUShort` takes a
+   `uint16_t` default, so passing `0x10000` and checking it came back is silently
+   truncated to 0 — the first boot read `limit=0mA`, `maxBrightnessForLimit(0)`
+   is 0, and the panel came up at brightness 0 with the guard doing exactly what
+   it was told. Fixed with `prefs.isKey()`: ask whether the key is there, never
+   infer it from a value the getter is allowed to invent.
+2. **The fallback was evaluated only at the end of the fade.** A fade finishes
+   ~1.9 s after the last frame, so a `LOCAL_FALLBACK_MS` of 15 s was never
+   satisfied at that instant: measured `live -> fading -> dark` and then nothing,
+   for as long as anyone watched. It now runs while the wall is dark. The fix
+   exposed a second one immediately — the dark branch was the function's fallthrough,
+   so `WALL_LOCAL` fell into it too and the player re-started itself every loop
+   iteration (1017 starts in the first second, startMs re-stamped each time, and
+   enough printed lines to block the UART and stop the status line). Both are why
+   `localStart()` now refuses to re-enter.
 
 ---
 
@@ -543,7 +759,7 @@ success:
 ```sh
 PIN=21                     # 48 for bring-up on the onboard LED, 21 for the panel
 STALE=0                    # 0 = hold the last frame (a display); 1500 = fade
-FQBN="esp32:esp32:esp32s3:FlashSize=8M,PSRAM=disabled,CDCOnBoot=cdc,UploadMode=default"
+FQBN="esp32:esp32:esp32s3:FlashSize=8M,PSRAM=disabled,CDCOnBoot=default,UploadMode=default"
 arduino-cli compile --fqbn "$FQBN" --build-path build \
   --build-property "compiler.cpp.extra_flags=-DPIN_DATA=$PIN -DSTALE_MS=$STALE" \
   --build-property "compiler.c.extra_flags=-DPIN_DATA=$PIN -DSTALE_MS=$STALE" \
@@ -943,6 +1159,52 @@ wire counters are `disc`, `resync`, `rewind`, and `torn` on a build that prints 
 
 **Compiled and flashed on this machine.** `arduino-cli 1.5.1` +
 `esp32:esp32 3.3.12` + `Adafruit NeoPixel 1.15.5`.
+
+### The player's builds (2026-10-28)
+
+`esp32:esp32:esp32s3:FlashSize=8M,PSRAM=disabled,CDCOnBoot=default,UploadMode=default`
+— `default`, not `cdc`, because the cable is in the CH343 UART port (see
+"`CDCOnBoot` must match the USB port the cable is in" above). All zero warnings
+from the sketch:
+
+```
+PLAYER=1 + STANDBY=1 (both default)        : 345394 B flash (26%), 32136 B RAM (9%)
+-STANDBY=0                                 : 344114 B flash (26%), 30928 B RAM (9%)
+-PLAYER=0 (sink + standby)                 : 292158 B flash (22%), 26656 B RAM (8%)
+-PLAYER=0 -DSTANDBY=0 (the bare sink)       : 290922 B flash (22%), 25448 B RAM (7%)
+-DSELFTEST=1 + PLAYER=1 + STANDBY=1        : 346190 B flash (26%), 32144 B RAM (9%)
+-STALE_MS=1500 -DLOCAL_FALLBACK_MS=15000    : 345498 B flash (26%), 32136 B RAM (9%)
+                                             ^ what the panel runs now
+```
+
+The standby costs ~1.4 KB of flash and ~1.2 KB of RAM (one 1200-byte frame
+buffer) and depends on neither the player nor the filesystem — it is the reason
+`-DPLAYER=0` builds are still useful.
+
+The player costs ~51 KB of flash (LittleFS + Preferences + the format) and ~5.5 KB
+of RAM — the three 1200-byte playback buffers, the 1 KB upload chunk and the CRC
+scratch. `-DPLAYER=0` is the number to compare against if the streamed path is
+ever suspected: it is the sketch as it was, byte for byte, with the player's
+call sites stubbed rather than removed.
+
+LITTLEFS: the show lives on the data partition. These boards are flashed with
+`FlashSize=8M` and the default scheme, whose partition table is
+
+```
+nvs      data nvs     0x009000  0x005000
+otadata  data ota     0x00e000  0x002000
+app0     app  ota_0   0x010000  0x140000
+app1     app  ota_1   0x150000  0x140000
+spiffs   data spiffs  0x290000  0x160000    <- LittleFS lives here (1.44 MB)
+coredump data coredump 0x3f0000 0x010000
+```
+
+so the show has **1.44 MB** to itself — about 1200 baked drawings, and a `.ledshow`
+of 100 drawings is 120 KB. `LittleFS.begin()` uses the `spiffs` label by default,
+which is why an already-flashed board needs no partition-table rewrite to gain a
+player: the partition was there, empty. A board flashed with a scheme that has no
+data partition prints `fs: unavailable, the player is off` and behaves as a sink —
+which is the right failure.
 
 Classic ESP32 (`--fqbn esp32:esp32:esp32`):
 

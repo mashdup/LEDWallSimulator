@@ -167,6 +167,18 @@ test("the WLED rig's status line parses, including the torn counter", () => {
   // says "no tearing", undefined says "this build cannot see tearing".
   const sketch = parseStatusLine('wall seq=137 br=85/85 est=4210mA cap=8000mA limit=8000mA state=live rx=0 frames=412 disc=1 gaps=0');
   assert.equal(sketch.torn, undefined, 'absent torn= must stay absent');
+
+  /* The standby: an idle wall driven by nothing but millis(). Its counter is the
+   * only proof a driver has that the animation is running rather than the panel
+   * having frozen, since a still ember and a hung loop look identical from here. */
+  const standby = parseStatusLine(
+    'wall seq=0 br=85/85 est=306mA cap=8000mA limit=8000mA state=standby rx=0 frames=0 '
+    + 'meta=0 disc=0 resync=0 rewind=0 gaps=0 stale=0 show=0 drawings=0 fp=0 worst=0mA '
+    + 'local=0 seams=0 falls=0 sb=1 rst=1 boots=1 prev=0/0/0/0',
+  );
+  assert.equal(standby.state, 'standby');
+  assert.equal(standby.standbyStarts, 1);
+  assert.equal(standby.estimateMa, 306, 'the idle wall reports its own draw, not the last stream');
 });
 
 test('a frame that fails its end byte never reaches the LEDs', () => {

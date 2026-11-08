@@ -10,6 +10,7 @@
   "scripts": {
     "test": "node --test --test-concurrency=1 --test-timeout=120000 \"test/*.test.js\"",
     "serve": "node tools/serve.js",
+    "bake": "node tools/bake.js",
     "start": "node tools/start.js",
     "wall": "node tools/start.js --electron",
     "freeport": "node tools/freeport.js",

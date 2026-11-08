@@ -9,8 +9,10 @@
 
 led-wall/
   core/        framebuffer, layout map, effects   (pure JS, no DOM)
+  core/showfile.js   the baked-show format the firmware plays (pure JS)
   web/         banner page + canvas sim + connect UI
   firmware/    esp32 sketch.ino
+  tools/bake.js      gallery -> .ledshow, and the cable upload
   test/        unit tests for core
 
 
@@ -519,3 +521,232 @@ The QR code itself is deliberately **not** implemented here. A QR encoder is
 and the failure mode is a matrix that looks right and does not scan � which is
 a party that cannot start, and no test in this suite can scan one. Any generator
 on the internet makes a correct QR for a 25-character URL in five seconds.
+
+## 9. The player: a wall with nothing attached
+
+The browser is the brain, and that is the right default — the fonts, the canvas,
+the drawings and the editor all live there. It has one failure mode the wall
+cannot forgive: **the laptop**. A tab closes, a machine sleeps, a cable is
+knocked, and a wall six months into being a family noticeboard goes black in the
+middle of a party with nothing to fall back on. `STALE_MS` fades it to black in
+1.5 s and it stays black until a byte arrives.
+
+So the sketch carries a **player**: a baked show in LittleFS — a header and N
+flat frames in the same 1200-byte wire order the decoder already speaks — which
+it plays at boot, or (opt-in) after a stream goes stale. `core/showfile.js` is
+the format, `tools/bake.js` makes one, and "The player" in `firmware/README.md`
+is how it is built, uploaded and read.
+
+### 9.1 A bake, not a firmware renderer
+
+The obvious version of this feature is "put the renderer on the ESP32". That is
+a port of `core/` to C++, and this is not it. The reason is not that it is hard
+(the pure modules are small and the S3 has an FPU) — it is that it would be a
+**second implementation of the same maths**, which is the one thing this project
+has spent its whole test suite avoiding. `layout.js` and `color.js` are not
+utilities: they are the wall's own calibration, measured on this panel, and two
+copies of them are two chances for the baked picture and the streamed picture to
+differ in a way nobody notices until the wall is the wrong colour.
+
+So the host keeps all of it. A baked frame is `animFrame` → `packInto` →
+`applyColor`, which are the exact three calls `web/app.js`'s frame loop makes,
+and the payload is byte-for-byte what `core/frame.js` puts on the wire. The
+device does three things to a frame: seek it, blend it with one other frame, and
+clock it out. That is a file read and 1200 bytes of integer arithmetic, and it
+cannot disagree with the renderer because it never re-derives anything.
+
+The trade is real and worth stating: **a bake is a snapshot.** It cannot do the
+banner marquee, the animations, the transitions beyond a fade, or a live gallery
+whose roster changes. It is the last show, held — which is exactly what a wall
+needs at 22:00 when the laptop has gone to sleep.
+
+### 9.2 The file
+
+```
+0..39         header, 40 bytes
+40..          count * 1200 bytes, wire order: physical LED order, R,G,B
+end-4..end    u32 LE crc32 of every byte before it
+```
+
+The header carries the count, the cadence (`intervalSec`, `gapSec`,
+`transitionMs`), the transition kind, the brightness and power limit the show was
+baked for, the worst-frame current, the calibration fingerprint, and `bodyBytes`
+so a truncated file is caught before a single frame is read. 1200 bytes per
+drawing means 100 drawings is 120 KB against 16 MB of flash: size was never the
+constraint.
+
+`test/showfile.test.js` is both halves of the gate — the format's own validation,
+and a **cross-language pin** that reads `firmware/firmware.ino` as text and
+requires its `SHOW_OFF_*` literals to equal the JS ones. That is the same trick
+`test/calibration.test.js` plays on the self-test, for the same reason: nothing
+else connects a C++ file to a JS one, and a drifted offset reads a gallery out of
+the middle of a colour.
+
+### 9.3 The slot clock, and the one arithmetic that is allowed here
+
+`showTiming()` is `galleryTiming()` with two differences a device without a
+browser forces — millis since playback started instead of epoch seconds, and a
+**black** break, because a baked show carries no gap animation — and one thing
+that is identical on purpose: both seams of a slot open, and the blend is clamped
+to half the drawing minus a quarter second, so two blends can never overlap at a
+boundary.
+
+Which drawing a slot shows is `slot % count`, and `core/content-protocol.js`
+bans that arithmetic in capitals. **The ban is correct there and wrong here**, and
+the distinction is the whole reason §9 is allowed it: a live gallery's roster
+mutates, so an index into it re-bases whenever a guest adds or prunes a drawing —
+that is the bug that made the wall skip seats and repeat pictures, and it was
+reported twice. A baked show's roster is a number in a file that nothing can
+change while it plays. There is no re-basing to get wrong. If the firmware ever
+grows a way to change the roster mid-show, the arithmetic has to go with it and
+the cursor has to move into the file.
+
+### 9.4 Boot fast, and lie slowly
+
+Two entry points, and they are deliberately not symmetric:
+
+- **At boot** → play immediately (`LOCAL_BOOT`, on). A wall that has been
+  power-cycled at a venue comes back showing the gallery instead of a dark
+  rectangle. Nothing to diagnose: the wall was not displaying anything before it
+  booted.
+- **Mid-stream** → `LOCAL_FALLBACK_MS`, **off by default**. Today's fade-to-black
+  is *honest*: it tells an operator standing in front of the wall that the tether
+  is dead, and an operator can plug a cable in. A wall that silently switches to
+  last month's gallery while a stream is broken is a wall that lies, and it hides
+  the one fault this whole watchdog exists to make visible. Turn it on for a
+  party, leave it off while calibrating.
+
+`WALL_LOCAL` is the fourth wall state next to dark / live / fading, and the
+precedence is one line each: a host frame ends local playback for the session
+(the show stays on flash for the next boot), and a meta frame repaints the
+current local frame through the same `renderFrom()` the streamed path uses.
+
+### 9.5 The operator's dial belongs to the wall
+
+Brightness and the power limit arrive in `0xA4` meta frames from the host. With
+no host there is nobody to send them, so they are persisted to NVS — throttled to
+one write per 10 s and skipped when nothing changed, because a wall that wears
+out its flash writing the same two bytes dies of bookkeeping.
+
+The precedence between the two statements about the same wall is: the operator's
+last dial (NVS) beats the show's header on brightness, because they were looking
+at the wall when they set it; and the **lower** of the two wins on the power
+limit, because it is the safer of two claims about one supply.
+`applyBrightnessGuard` is applied last, as always, so nothing gets past
+`maxBrightnessForLimit`.
+
+### 9.6 Uploading over the cable that is already there
+
+The wall is in a venue and there is a cable. So the show arrives on it: two
+records in the same byte stream as the frames, told apart by magic, so the host
+needs no separate mode.
+
+```
+0xA3 | seq u8 | offset u32 | len u16 | payload | 0x5B
+0xA2 | size u32 | crc32 u32 | 0x5B
+```
+
+**Contiguity is enforced, not assumed.** A chunk's offset must be exactly what
+has been written, so a record lost in the cable is a *refusal* instead of a hole
+— and a hole is the worst outcome here, because it leaves a file with a valid
+length, a valid crc over what was written, and a silent gap in the middle of a
+drawing, and every check would pass.
+
+`offset` must be exactly what has been written, so a record lost in the cable is
+a *refusal* instead of a hole — and a hole is the worst outcome here, because it
+leaves a file with a valid length, a valid crc over what was written, and a
+silent gap in the middle of a drawing, and every check would pass.
+
+**The wall sets the pace.** Each accepted chunk is acknowledged with
+`upload: chunk <bytes>`, and the baker waits for that line before sending the
+next one. This is not a progress bar; it is the flow control without which the
+upload does not work. A flash write takes milliseconds and a 921600 UART fills
+the device's 4 KB ring in ~44 ms, so an unpaced host writes into a ring that is
+already full while the wall is inside LittleFS, and the symptom is a chunk whose
+tail byte never arrives. Measured: a 6 KB show aborted on every unpaced attempt,
+and landed first try with 60 ms between chunks. Acking makes the upload exactly
+as fast as the flash, and turns a lost record into a specific error at the chunk
+that lost it rather than a twenty-second silence at commit time.
+
+Nothing touches `/show.led` until the commit record verifies: the size, then a
+crc the device has been accumulating as it wrote, then a full `showProbe()` on
+the temp file, because a file can arrive intact and still be something this
+firmware cannot play. Only then is the live show renamed aside, the new one
+renamed in, and the old one deleted — so the window in which neither exists is a
+rename, not an upload.
+
+### 9.7 The fingerprint, which is a person's check and not the machine's
+
+A baked frame has two host-side transforms frozen into it, and only one of them
+is obvious. The LED fine-tune is the one everybody remembers. The **layout
+permutation** is the one that bites: frames are in physical LED order, so
+re-measuring the wiring and changing a `snake`/`flip`/`transpose` flag re-addresses
+every baked frame to the wrong beads. That is not a colour cast, it is a
+scrambled picture, and re-dialling the fine-tune will never fix it.
+
+`calibrationFingerprint()` covers both. The device cannot recompute it — it has
+no layout map and runs no colour maths — so it **reports** it (`fp=` in the
+status line) and the console's number is the comparison. That is a check a person
+makes, not one the machine makes, and it is stated that way rather than dressed
+up as enforcement. The fix, when it is worth doing, is to port `color.js` — a
+256-entry gamma table and three per-pixel gains — and apply the tune on-device.
+That is the first slice of any §10, and it does not require the renderer.
+
+### 9.8 What this does not do
+
+- **No animations, no banner text.** Both need the renderer: `animations.js` is
+  pure functions of time so it would port, but text needs a font atlas, because
+  `raster.js` eats an RGBA bitmap that the browser makes with canvas type. A
+  static gallery with fades does not need either.
+- **No `wipe` / `dissolve` / `slide`.** The format refuses them rather than
+  turning them into a fade on the wall — a dissolve that silently becomes a fade
+  would look like a bug and pass every test. Two transitions is the honest budget
+  for the device's 1200-byte integer blend.
+- **No live roster.** The device is a player, not a wall client. Guest drawings
+  still arrive by the door that already works (phone → relay → the wall laptop),
+  and the baked show is what plays when that laptop is not there. Making the
+  device *pull* from the relay (`/pull` already exists and is wall-key
+  authenticated) is the natural §10 — and it brings the cursor problem with it,
+  which is why it is not bolted on here.
+
+### 9.9 The standby: an idle wall that is alive
+
+The bake is the wall's *last show, held*. This is the cheaper thing underneath
+it, and for most evenings it is the right one: an **animated standby** that lives
+in the firmware. No host, no filesystem, no bake, no format, and it works on a
+board with a blank flash.
+
+Three effects — `ember` (a slow amber fire), `drift` (soft bands sliding), and
+`breathe` (one warm gradient on an 8 s cycle) — plus `cycle`, which walks all
+three every 25 s. `-D STANDBY=<0..4>`, and `0` puts the wall back to going dark
+for a calibration pass.
+
+**It is deliberately not `core/animations.js`.** Those animations are the
+*content*, and they stay the host's: a C++ copy of `fire` would be a second
+answer to what the wall is showing, and the two would drift apart the way the two
+power estimators nearly did. Standby art is a different job. It should read as
+"the wall is idling", the way a screensaver does, so being visibly calmer than
+any content is the feature and not a compromise.
+
+Three details that are decisions, not defaults:
+
+- **It paints in physical LED order.** The firmware has no layout map (§9.1), so
+  LED `i` is addressed as column `i/20`, row `i%20` — this panel's measured
+  wiring. Re-measure the wiring and the standby comes out mirrored or rotated; it
+  is still an animation, and it is standby art, so that is cosmetic. Content is
+  untouched, because content is packed host-side by the real layout.
+- **It runs dimmer than content** (`STANDBY_LEVEL`, default 160/255, folded in as
+  a render scale). An idle wall may be on all night with nobody watching, and 400
+  beads at content brightness is heat, power and LED hours spent on nothing. The
+  operator's brightness and the power guard still apply on top — measured ~300 mA
+  for `ember` at 85/255.
+- **`est=` reports the wall's actual draw while idle.** The estimator reads
+  whichever buffer is on the panel, because reporting a stale stream's current
+  for a wall showing an ember is a number somebody would believe.
+
+One precedence rule, and it is the same at boot and at the end of a dead stream:
+**the baked show wins if one is on flash, the standby is what is always
+available.** A wall that preferred the gallery at boot and the ember after a
+disconnect would look like it changed its mind. With no show baked — which is the
+normal case if you never wanted a gallery — the wall is never dark, never needs a
+host, and has nothing that can go stale.
